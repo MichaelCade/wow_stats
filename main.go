@@ -635,7 +635,8 @@ func handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go fetchCharacterData()
+	// Run synchronously so the redirect only happens once data is fresh
+	fetchCharacterData()
 
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
@@ -1179,6 +1180,15 @@ const htmlTemplate = `
             text-align: center;
             margin-top: 30px;
         }
+        .refresh-note {
+            margin-top: 12px;
+            color: #8a7a5a;
+            font-size: 0.85em;
+            font-style: italic;
+        }
+        .refresh-note strong {
+            color: #b09a6a;
+        }
         .btn {
             background: linear-gradient(135deg, rgba(61, 48, 32, 0.8) 0%, rgba(40, 32, 20, 0.8) 100%);
             border: 2px solid #7d6a4d;
@@ -1417,8 +1427,11 @@ const htmlTemplate = `
 
         <div class="controls">
             <form action="/refresh" method="POST" style="display: inline;">
-                <button type="submit" class="btn">🔄 Refresh Data</button>
+                <button type="submit" class="btn" id="refresh-btn" onclick="this.disabled=true; this.textContent='⏳ Refreshing…'">🔄 Refresh Data</button>
             </form>
+            <div class="refresh-note">
+                💡 Data only updates after you <strong>log out</strong> of a character in-game — Blizzard's API reflects the last logout state.
+            </div>
         </div>
         {{end}}
         {{end}}
