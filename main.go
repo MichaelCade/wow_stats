@@ -29,19 +29,22 @@ type Config struct {
 }
 
 type CharacterStats struct {
-	Name         string
-	Realm        string
-	Level        int
-	ItemLevel    int
-	Gold         int64
-	Class        string
-	Race         string
-	Faction      string
-	LastLogin    int64  // Unix timestamp
-	ThumbnailURL string // Character portrait URL
-	Professions  []Profession
-	Error        string
-	LastUpdate   time.Time
+	Name             string
+	Realm            string
+	Level            int
+	ItemLevel        int
+	Gold             int64
+	Class            string
+	Race             string
+	Faction          string
+	LastLogin        int64  // Unix timestamp
+	ThumbnailURL     string // Character portrait URL
+	Professions      []Profession
+	LastRaidKill     string // Name of the most recently killed raid boss
+	LastRaidInstance string // Name of the raid it was in
+	LastRaidTime     int64  // Unix timestamp (ms) of the kill
+	Error            string
+	LastUpdate       time.Time
 }
 
 type Profession struct {
@@ -113,6 +116,7 @@ func main() {
 	http.HandleFunc("/callback", handleCallback)
 	http.HandleFunc("/refresh", handleRefresh)
 	http.HandleFunc("/api/stats", handleAPIStats)
+	http.HandleFunc("/debug/raids", handleDebugRaids)
 
 	// Serve static files (images)
 	fs := http.FileServer(http.Dir("./images"))
@@ -535,6 +539,59 @@ func fetchCharacterDetails(client *http.Client, realm, name, protectedHref strin
 		}
 	}
 
+	// Fetch last raid kill
+	raidsURL := fmt.Sprintf("https://%s.api.blizzard.com/profile/wow/character/%s/%s/encounters/raids?namespace=profile-%s&locale=%s",
+		config.Region, normalizedRealm, normalizedName, config.Region, config.Locale)
+	raidsResp, err := client.Get(raidsURL)
+	if err == nil {
+		defer raidsResp.Body.Close()
+		if raidsResp.StatusCode == http.StatusOK {
+			var raidsData struct {
+				Expansions []struct {
+					Instances []struct {
+						Instance struct {
+							Name string `json:"name"`
+						} `json:"instance"`
+						Modes []struct {
+							Progress struct {
+								Encounters []struct {
+									Encounter struct {
+										Name string `json:"name"`
+									} `json:"encounter"`
+									LastKillTimestamp int64 `json:"last_kill_timestamp"`
+									CompletedCount    int   `json:"completed_count"`
+								} `json:"encounters"`
+							} `json:"progress"`
+						} `json:"modes"`
+					} `json:"instances"`
+				} `json:"expansions"`
+			}
+			if err := json.NewDecoder(raidsResp.Body).Decode(&raidsData); err == nil {
+				var latestTs int64
+				var latestBoss, latestInstance string
+				for _, exp := range raidsData.Expansions {
+					for _, inst := range exp.Instances {
+						for _, mode := range inst.Modes {
+							for _, enc := range mode.Progress.Encounters {
+								if enc.CompletedCount > 0 && enc.LastKillTimestamp > latestTs {
+									latestTs = enc.LastKillTimestamp
+									latestBoss = enc.Encounter.Name
+									latestInstance = inst.Instance.Name
+								}
+							}
+						}
+					}
+				}
+				if latestBoss != "" {
+					stats.LastRaidKill = latestBoss
+					stats.LastRaidInstance = latestInstance
+					stats.LastRaidTime = latestTs
+					log.Printf("Character %s-%s: Last raid kill = %s (%s)", realm, name, latestBoss, latestInstance)
+				}
+			}
+		}
+	}
+
 	return stats
 }
 
@@ -580,6 +637,52 @@ func handleAPIStats(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(data)
+}
+
+func handleDebugRaids(w http.ResponseWriter, r *http.Request) {
+	tokenMutex.RLock()
+	token := userToken
+	tokenMutex.RUnlock()
+
+	if token == nil {
+		http.Error(w, "Not authenticated", http.StatusUnauthorized)
+		return
+	}
+
+	// Default to axefury on the-maelstrom, allow override via query params
+	realm := r.URL.Query().Get("realm")
+	name := r.URL.Query().Get("name")
+	if realm == "" {
+		realm = "the-maelstrom"
+	}
+	if name == "" {
+		name = "axefury"
+	}
+
+	ctx := context.Background()
+	client := oauth2Config.Client(ctx, token)
+
+	url := fmt.Sprintf("https://%s.api.blizzard.com/profile/wow/character/%s/%s/encounters/raids?namespace=profile-%s&locale=%s",
+		config.Region, realm, strings.ToLower(name), config.Region, config.Locale)
+
+	log.Printf("DEBUG raids URL: %s", url)
+	resp, err := client.Get(url)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Request failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+
+	var raw interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		http.Error(w, fmt.Sprintf("Decode failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	enc.Encode(raw)
 }
 
 func formatGold(copper int64) string {
@@ -945,6 +1048,15 @@ const htmlTemplate = `
             color: #ffd700;
             text-shadow: 0 0 8px rgba(255, 215, 0, 0.4);
         }
+        .raid-kill {
+            color: #f87171;
+            font-weight: 600;
+        }
+        .raid-instance {
+            color: #94a3b8;
+            font-size: 0.85em;
+            font-style: italic;
+        }
         .error-message {
             color: #ff6b6b;
             font-size: 0.9em;
@@ -1183,6 +1295,16 @@ const htmlTemplate = `
                     <div class="stat-row">
                         <span class="stat-label">Last Played:</span>
                         <span class="stat-value">{{formatLastLogin .LastLogin}}</span>
+                    </div>
+                    {{end}}
+                    {{if .LastRaidKill}}
+                    <div class="stat-row">
+                        <span class="stat-label">Last Raid Kill:</span>
+                        <span class="stat-value raid-kill">{{.LastRaidKill}}</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label"></span>
+                        <span class="stat-value raid-instance">{{.LastRaidInstance}} · {{formatLastLogin .LastRaidTime}}</span>
                     </div>
                     {{end}}
                     {{if .Professions}}
