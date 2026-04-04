@@ -2,6 +2,8 @@
 
 A self-hosted World of Warcraft character dashboard that uses the official Battle.net API to display stats across all characters on your account.
 
+![WoW Stats Tracker Preview](example.png)
+
 ## Features
 
 - 🏆 **All Characters** — Automatically discovers every character on your account
