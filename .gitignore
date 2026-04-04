@@ -1,0 +1,30 @@
+# Environment variables - never commit this!
+.env
+
+# Go build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+wow_stats
+
+# Backup files
+*.backup
+
+# Go workspace files
+go.work
+go.work.sum
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

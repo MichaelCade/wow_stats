@@ -1,0 +1,11 @@
+version: '3.8'
+
+services:
+  wow_stats:
+    build: .
+    ports:
+      - "8081:8081"
+    env_file:
+      - .env
+    restart: unless-stopped
+    container_name: wow_stats
