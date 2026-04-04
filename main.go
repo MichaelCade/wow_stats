@@ -51,10 +51,12 @@ type Profession struct {
 }
 
 type AccountSummary struct {
-	Characters    []CharacterStats
-	TotalGold     int64
-	LastUpdate    time.Time
-	Authenticated bool
+	Characters      []CharacterStats
+	TotalGold       int64
+	MountsCollected int
+	PetsCollected   int
+	LastUpdate      time.Time
+	Authenticated   bool
 }
 
 var (
@@ -321,17 +323,56 @@ func fetchCharacterData() {
 		}
 	}
 
+	// Fetch account-wide collections (mounts & pets)
+	var mountsCollected, petsCollected int
+
+	mountsURL := fmt.Sprintf("https://%s.api.blizzard.com/profile/user/wow/collections/mounts?namespace=profile-%s&locale=%s",
+		config.Region, config.Region, config.Locale)
+	if mountsResp, err := client.Get(mountsURL); err == nil {
+		defer mountsResp.Body.Close()
+		if mountsResp.StatusCode == 200 {
+			var mountsData struct {
+				Mounts []interface{} `json:"mounts"`
+			}
+			if err := json.NewDecoder(mountsResp.Body).Decode(&mountsData); err == nil {
+				mountsCollected = len(mountsData.Mounts)
+				log.Printf("Mounts collected: %d", mountsCollected)
+			}
+		} else {
+			log.Printf("Mounts endpoint returned HTTP %d", mountsResp.StatusCode)
+		}
+	}
+
+	petsURL := fmt.Sprintf("https://%s.api.blizzard.com/profile/user/wow/collections/pets?namespace=profile-%s&locale=%s",
+		config.Region, config.Region, config.Locale)
+	if petsResp, err := client.Get(petsURL); err == nil {
+		defer petsResp.Body.Close()
+		if petsResp.StatusCode == 200 {
+			var petsData struct {
+				Pets []interface{} `json:"pets"`
+			}
+			if err := json.NewDecoder(petsResp.Body).Decode(&petsData); err == nil {
+				petsCollected = len(petsData.Pets)
+				log.Printf("Pets collected: %d", petsCollected)
+			}
+		} else {
+			log.Printf("Pets endpoint returned HTTP %d", petsResp.StatusCode)
+		}
+	}
+
 	summaryMutex.Lock()
 	accountSummary = AccountSummary{
-		Characters:    allCharacters,
-		TotalGold:     totalGold,
-		LastUpdate:    time.Now(),
-		Authenticated: true,
+		Characters:      allCharacters,
+		TotalGold:       totalGold,
+		MountsCollected: mountsCollected,
+		PetsCollected:   petsCollected,
+		LastUpdate:      time.Now(),
+		Authenticated:   true,
 	}
 	summaryMutex.Unlock()
 
-	log.Printf("Data updated. Found %d characters. Total gold: %s",
-		len(allCharacters), formatGold(totalGold))
+	log.Printf("Data updated. Found %d characters. Total gold: %s. Mounts: %d, Pets: %d",
+		len(allCharacters), formatGold(totalGold), mountsCollected, petsCollected)
 }
 
 func fetchCharacterDetails(client *http.Client, realm, name, protectedHref string) CharacterStats {
@@ -725,6 +766,45 @@ const htmlTemplate = `
             margin-bottom: 40px;
             box-shadow: 0 8px 32px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.1);
         }
+        .summary-grid {
+            display: flex;
+            justify-content: center;
+            gap: 40px;
+            flex-wrap: wrap;
+        }
+        .summary-stat {
+            text-align: center;
+        }
+        .summary-stat-label {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            font-size: 0.85em;
+            color: #9b8a6e;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            margin-bottom: 6px;
+        }
+        .summary-stat-label img {
+            width: 24px;
+            height: 24px;
+            filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5));
+        }
+        .summary-stat-value {
+            font-size: 2em;
+            font-weight: bold;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.8);
+            letter-spacing: 1px;
+        }
+        .summary-stat-value.gold { color: #ffd700; text-shadow: 0 0 10px rgba(255, 215, 0, 0.5), 2px 2px 4px rgba(0,0,0,0.8); }
+        .summary-stat-value.mounts { color: #a78bfa; }
+        .summary-stat-value.pets { color: #6ee7b7; }
+        .summary-divider {
+            width: 1px;
+            background: #3d3020;
+            align-self: stretch;
+        }
         .total-gold {
             font-size: 2.2em;
             font-weight: bold;
@@ -1017,8 +1097,31 @@ const htmlTemplate = `
         </div>
         {{else}}
         <div class="summary">
-            <div class="total-gold">
-                Total Account Gold: {{formatGold .TotalGold}}
+            <div class="summary-grid">
+                <div class="summary-stat">
+                    <div class="summary-stat-label">
+                        <img src="/images/gold.png" alt="Gold"> Total Account Gold
+                    </div>
+                    <div class="summary-stat-value gold">{{formatGold .TotalGold}}</div>
+                </div>
+                {{if .MountsCollected}}
+                <div class="summary-divider"></div>
+                <div class="summary-stat">
+                    <div class="summary-stat-label">
+                        <img src="/images/mount.png" alt="Mounts"> Mounts Collected
+                    </div>
+                    <div class="summary-stat-value mounts">{{.MountsCollected}}</div>
+                </div>
+                {{end}}
+                {{if .PetsCollected}}
+                <div class="summary-divider"></div>
+                <div class="summary-stat">
+                    <div class="summary-stat-label">
+                        <img src="/images/pet.png" alt="Pets"> Pets Collected
+                    </div>
+                    <div class="summary-stat-value pets">{{.PetsCollected}}</div>
+                </div>
+                {{end}}
             </div>
         </div>
 
