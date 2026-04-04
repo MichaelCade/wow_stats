@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -117,6 +118,7 @@ func main() {
 	http.HandleFunc("/refresh", handleRefresh)
 	http.HandleFunc("/api/stats", handleAPIStats)
 	http.HandleFunc("/debug/raids", handleDebugRaids)
+	http.HandleFunc("/debug/profile", handleDebugProfile)
 
 	// Serve static files (images)
 	fs := http.FileServer(http.Dir("./images"))
@@ -241,12 +243,8 @@ func fetchCharacterData() {
 	log.Printf("Found %d WoW accounts", len(accountsResp.WoWAccounts))
 	for i, acc := range accountsResp.WoWAccounts {
 		log.Printf("Account %d (ID: %d) has %d characters", i, acc.ID, len(acc.Characters))
-		if len(acc.Characters) > 0 {
-			log.Printf("  First character: name='%s', realm='%s', level=%d, class='%s'",
-				acc.Characters[0].Name,
-				acc.Characters[0].Realm.Slug,
-				acc.Characters[0].Level,
-				acc.Characters[0].PlayableClass.Name)
+		for _, ch := range acc.Characters {
+			log.Printf("  character: name='%s', realm='%s', level=%d", ch.Name, ch.Realm.Slug, ch.Level)
 		}
 	}
 
@@ -308,6 +306,12 @@ func fetchCharacterData() {
 	}()
 
 	for stats := range statsChan {
+		// Characters below level 10 return 404 from the profile API.
+		// Keep them but mark them so we can show a minimal stub card.
+		if stats.Error == "HTTP 404" {
+			log.Printf("Stub card for %s-%s (below level 10, no profile data available)", stats.Realm, stats.Name)
+			stats.Error = "below_level_10"
+		}
 		allCharacters = append(allCharacters, stats)
 	}
 
@@ -406,8 +410,14 @@ func fetchCharacterDetails(client *http.Client, realm, name, protectedHref strin
 
 	// Check HTTP status
 	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		var errBody map[string]interface{}
+		if jsonErr := json.Unmarshal(bodyBytes, &errBody); jsonErr == nil {
+			log.Printf("HTTP %d for %s-%s: %v", resp.StatusCode, realm, name, errBody)
+		} else {
+			log.Printf("HTTP %d for %s-%s (URL: %s)", resp.StatusCode, realm, name, profileURL)
+		}
 		stats.Error = fmt.Sprintf("HTTP %d", resp.StatusCode)
-		log.Printf("HTTP %d for %s-%s (URL: %s)", resp.StatusCode, realm, name, profileURL)
 		return stats
 	}
 
@@ -685,6 +695,48 @@ func handleDebugRaids(w http.ResponseWriter, r *http.Request) {
 	enc.Encode(raw)
 }
 
+// handleDebugProfile fetches the raw profile API response for any character
+// so we can see exactly what Blizzard returns, including error bodies on 404.
+// Usage: /debug/profile?realm=the-maelstrom&name=cesard
+func handleDebugProfile(w http.ResponseWriter, r *http.Request) {
+	tokenMutex.RLock()
+	token := userToken
+	tokenMutex.RUnlock()
+
+	if token == nil {
+		http.Error(w, "Not authenticated", http.StatusUnauthorized)
+		return
+	}
+
+	realm := r.URL.Query().Get("realm")
+	name := r.URL.Query().Get("name")
+	if realm == "" || name == "" {
+		http.Error(w, "require ?realm=X&name=Y", http.StatusBadRequest)
+		return
+	}
+
+	ctx := context.Background()
+	client := oauth2Config.Client(ctx, token)
+
+	url := fmt.Sprintf("https://%s.api.blizzard.com/profile/wow/character/%s/%s?namespace=profile-%s&locale=%s",
+		config.Region, strings.ToLower(realm), strings.ToLower(name), config.Region, config.Locale)
+
+	log.Printf("DEBUG profile URL: %s", url)
+	resp, err := client.Get(url)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Request failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	log.Printf("DEBUG profile HTTP %d for %s-%s: %s", resp.StatusCode, realm, name, string(body))
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	w.Write(body)
+}
+
 func formatGold(copper int64) string {
 	gold := copper / 10000
 	silver := (copper % 10000) / 100
@@ -960,6 +1012,30 @@ const htmlTemplate = `
         .character-card.error {
             background: linear-gradient(135deg, rgba(60, 20, 20, 0.95) 0%, rgba(40, 15, 15, 0.95) 100%);
             border-color: #8b3a3a;
+        }
+        .character-card.stub {
+            background: linear-gradient(135deg, rgba(30, 30, 40, 0.85) 0%, rgba(20, 20, 30, 0.85) 100%);
+            border-color: #3a3a5a;
+            opacity: 0.7;
+        }
+        .stub-notice {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 18px 0 6px 0;
+            color: #7a7a9a;
+            font-size: 0.9em;
+            text-align: center;
+        }
+        .stub-notice .stub-icon {
+            font-size: 2em;
+            opacity: 0.5;
+        }
+        .stub-notice .stub-text {
+            color: #9a9ab8;
+            font-style: italic;
         }
         .character-name {
             font-size: 1.6em;
@@ -1239,6 +1315,20 @@ const htmlTemplate = `
 
         <div class="characters">
             {{range .Characters}}
+            {{if eq .Error "below_level_10"}}
+            <div class="character-card stub">
+                <div class="character-header">
+                    <div class="character-info">
+                        <div class="character-name">{{.Name}}</div>
+                        <div class="character-realm">{{.Realm}}</div>
+                    </div>
+                </div>
+                <div class="stub-notice">
+                    <span class="stub-icon">🌱</span>
+                    <span class="stub-text">Below level 10 — no profile data available</span>
+                </div>
+            </div>
+            {{else}}
             <div class="character-card {{if .Error}}error{{end}}">
                 {{if not .Error}}
                 <div class="character-header">
@@ -1321,6 +1411,7 @@ const htmlTemplate = `
                     {{end}}
                 {{end}}
             </div>
+            {{end}}
             {{end}}
         </div>
 
