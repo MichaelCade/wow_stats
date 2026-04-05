@@ -992,14 +992,43 @@ var rosterTemplate = `<!DOCTYPE html>
         .task-label {
             flex: 1;
         }
-        .task-source {
-            font-size: 0.82em;
-            color: #7a6a4a;
+        .task-mark-btn {
+            font-size: 0.78em;
+            font-family: inherit;
             margin-left: auto;
             white-space: nowrap;
+            cursor: pointer;
+            background: linear-gradient(135deg, rgba(61,48,32,0.9), rgba(40,32,20,0.9));
+            border: 1px solid #7d6a4d;
+            color: #c8b48a;
+            padding: 3px 10px;
+            border-radius: 4px;
+            transition: all 0.15s;
         }
-        .task-item.done .task-source {
-            opacity: 0.4;
+        .task-mark-btn:hover {
+            border-color: #c8a96e;
+            color: #ffe680;
+            background: rgba(80,60,20,0.9);
+        }
+        .task-mark-btn.done-btn {
+            background: rgba(110,231,183,0.12);
+            border-color: #6ee7b7;
+            color: #6ee7b7;
+        }
+        .task-mark-btn.done-btn:hover {
+            background: rgba(180,50,50,0.15);
+            border-color: #e06060;
+            color: #ffaaaa;
+        }
+        .task-vault-badge {
+            font-size: 0.78em;
+            margin-left: auto;
+            white-space: nowrap;
+            color: #6ee7b7;
+            opacity: 0.7;
+        }
+        .task-item.done .task-vault-badge {
+            opacity: 0.45;
         }
 
         /* section header within task list */
@@ -1122,8 +1151,25 @@ var rosterTemplate = `<!DOCTYPE html>
 
     // Extra per-character manual tasks (not vault-linked)
     const MANUAL_TASKS = [
-        { key: 'weekly-quest', icon: '/images/quest.png', label: 'Weekly Quest', section: 'General' },
-        { key: 'world-boss',   icon: '/images/delve.png', label: 'World Boss',   section: 'General' },
+        // ── Vault ──
+        { key: 'open-vault',       icon: '/images/vault-button.png', label: 'Open your Vault',                                  section: 'Vault' },
+        // ── General ──
+        { key: 'world-event-quest',icon: '/images/quest.png',        label: 'World Event quest (Lady Liadrin — earn a Spark)',   section: 'General' },
+        { key: 'housing-quest',    icon: '/images/quest.png',        label: 'Housing weekly (Vaeli, outside Silvermoon bank)',   section: 'General' },
+        { key: 'world-boss',       icon: '/images/raid.png',         label: 'World Boss',                                       section: 'General' },
+        // ── Raids ──
+        { key: 'lfr-4set',         icon: '/images/raid.png',         label: 'LFR — hunt for 4-set bonus',                       section: 'Raids' },
+        // ── Dungeons ──
+        { key: 'mplus-weekly',     icon: '/images/dungeon.png',      label: 'M+ keys — farm highest possible (up to +10)',      section: 'Dungeons' },
+        // ── World / Prey ──
+        { key: 'prey-weekly',      icon: '/images/quest.png',        label: 'Nightmare Prey ×3 (weekly quest)',                 section: 'World' },
+        // ── Delves ──
+        { key: 'delve-t11',        icon: '/images/delve.png',        label: 'Delves — at least one T11',                        section: 'Delves' },
+        // ── Currencies ──
+        { key: 'spend-crests',     icon: '/images/quest.png',        label: 'Spend Champion crests & below on upgrades',        section: 'Currencies' },
+        // ── Rotating / Optional ──
+        { key: 'timewalking-raid', icon: '/images/raid.png',         label: 'Timewalking raid quest (Hero-track reward)',        section: 'Optional' },
+        { key: 'timewalking-dung', icon: '/images/dungeon.png',      label: 'Timewalking dungeon quest (if active)',             section: 'Optional' },
     ];
 
     // ── Load data ──
@@ -1254,22 +1300,21 @@ var rosterTemplate = `<!DOCTYPE html>
                 item.appendChild(labelEl);
 
                 if (task.isVault) {
-                    const src = document.createElement('span');
-                    src.className = 'task-source';
-                    src.textContent = task.done ? 'Tracked in Vault ✓' : 'Set in Great Vault →';
-                    item.appendChild(src);
+                    if (task.done) {
+                        const badge = document.createElement('span');
+                        badge.className = 'task-vault-badge';
+                        badge.textContent = 'Vault ✓';
+                        item.appendChild(badge);
+                    }
                 } else {
-                    // Manual checkbox
-                    const src = document.createElement('span');
-                    src.className = 'task-source';
-                    src.style.cursor = 'pointer';
-                    src.style.userSelect = 'none';
-                    src.textContent = task.done ? 'Done ✓' : 'Mark done';
-                    src.addEventListener('click', () => {
+                    // Manual toggle button
+                    const btn = document.createElement('button');
+                    btn.className = 'task-mark-btn' + (task.done ? ' done-btn' : '');
+                    btn.textContent = task.done ? '✓ Done — undo?' : 'Mark done';
+                    btn.addEventListener('click', () => {
                         toggleManual(char.key, task.key);
                     });
-                    item.appendChild(src);
-                    item.style.cursor = 'default';
+                    item.appendChild(btn);
                 }
 
                 taskList.appendChild(item);
