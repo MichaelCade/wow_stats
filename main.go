@@ -1239,6 +1239,10 @@ var vaultTemplate = `<!DOCTYPE html>
         const c = charData[key];
         if (!c) return;
 
+        // Prevent the same character appearing more than once in the same slot
+        const alreadyInSlot = zone.querySelector('.slot-card[data-char-key="' + key + '"]');
+        if (alreadyInSlot) return;
+
         // Remove empty hint if present
         const hint = zone.querySelector('.empty-hint');
         if (hint) hint.remove();
