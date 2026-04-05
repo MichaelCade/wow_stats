@@ -48,10 +48,24 @@ type CharacterStats struct {
 	LastUpdate       time.Time
 }
 
+type ProfessionTier struct {
+	TierName string // e.g. "Midnight Blacksmithing", "The War Within Blacksmithing"
+	Skill    int
+	Max      int
+}
+
 type Profession struct {
-	Name string
-	Tier int
-	Max  int
+	Name        string
+	IsSecondary bool
+	Tiers       []ProfessionTier // all expansion tiers, oldest first
+}
+
+// CurrentTier returns the most recent (highest index) tier, or a zero-value if none.
+func (p Profession) CurrentTier() ProfessionTier {
+	if len(p.Tiers) == 0 {
+		return ProfessionTier{}
+	}
+	return p.Tiers[len(p.Tiers)-1]
 }
 
 type AccountSummary struct {
@@ -120,6 +134,7 @@ func main() {
 	http.HandleFunc("/refresh", handleRefresh)
 	http.HandleFunc("/vault", handleVault)
 	http.HandleFunc("/roster", handleRoster)
+	http.HandleFunc("/professions", handleProfessions)
 	http.HandleFunc("/api/stats", handleAPIStats)
 	http.HandleFunc("/debug/raids", handleDebugRaids)
 	http.HandleFunc("/debug/profile", handleDebugProfile)
@@ -499,34 +514,50 @@ func fetchCharacterDetails(client *http.Client, realm, name, protectedHref strin
 		if profResp.StatusCode == http.StatusOK {
 			var profData map[string]interface{}
 			if err := json.NewDecoder(profResp.Body).Decode(&profData); err == nil {
-				// Primary professions
-				if primaries, ok := profData["primaries"].([]interface{}); ok {
-					for _, p := range primaries {
-						if prof, ok := p.(map[string]interface{}); ok {
-							profession := Profession{}
-							if profName, ok := prof["profession"].(map[string]interface{}); ok {
-								if name, ok := profName["name"].(string); ok {
-									profession.Name = name
-								}
-							}
-							// Get skill tier info (current expansion)
-							if tiers, ok := prof["tiers"].([]interface{}); ok && len(tiers) > 0 {
-								// Get the latest tier (usually the last one)
-								latestTier := tiers[len(tiers)-1]
-								if tier, ok := latestTier.(map[string]interface{}); ok {
-									if skillPoints, ok := tier["skill_points"].(float64); ok {
-										profession.Tier = int(skillPoints)
-									}
-									if maxSkillPoints, ok := tier["max_skill_points"].(float64); ok {
-										profession.Max = int(maxSkillPoints)
-									}
-								}
-							}
-							if profession.Name != "" {
-								stats.Professions = append(stats.Professions, profession)
+				parseProfList := func(list []interface{}, secondary bool) {
+					for _, p := range list {
+						prof, ok := p.(map[string]interface{})
+						if !ok {
+							continue
+						}
+						profession := Profession{IsSecondary: secondary}
+						if profName, ok := prof["profession"].(map[string]interface{}); ok {
+							if n, ok := profName["name"].(string); ok {
+								profession.Name = n
 							}
 						}
+						// Capture every expansion tier (oldest → newest)
+						if tiers, ok := prof["tiers"].([]interface{}); ok {
+							for _, t := range tiers {
+								tier, ok := t.(map[string]interface{})
+								if !ok {
+									continue
+								}
+								pt := ProfessionTier{}
+								if tn, ok := tier["tier"].(map[string]interface{}); ok {
+									if n, ok := tn["name"].(string); ok {
+										pt.TierName = n
+									}
+								}
+								if sp, ok := tier["skill_points"].(float64); ok {
+									pt.Skill = int(sp)
+								}
+								if mp, ok := tier["max_skill_points"].(float64); ok {
+									pt.Max = int(mp)
+								}
+								profession.Tiers = append(profession.Tiers, pt)
+							}
+						}
+						if profession.Name != "" {
+							stats.Professions = append(stats.Professions, profession)
+						}
 					}
+				}
+				if primaries, ok := profData["primaries"].([]interface{}); ok {
+					parseProfList(primaries, false)
+				}
+				if secondaries, ok := profData["secondaries"].([]interface{}); ok {
+					parseProfList(secondaries, true)
 				}
 			}
 		}
@@ -786,6 +817,583 @@ func handleRoster(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func handleProfessions(w http.ResponseWriter, r *http.Request) {
+	summaryMutex.RLock()
+	summary := accountSummary
+	summaryMutex.RUnlock()
+
+	tmpl, err := template.New("professions").Funcs(template.FuncMap{
+		"lower": strings.ToLower,
+	}).Parse(professionsTemplate)
+	if err != nil {
+		http.Error(w, "Template error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := tmpl.Execute(w, summary); err != nil {
+		log.Printf("Professions template error: %v", err)
+	}
+}
+
+var professionsTemplate = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Profession Tracker</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background: linear-gradient(to bottom, #0a0e1a 0%, #1a1f2e 50%, #0f1419 100%);
+            color: #f8e6c8;
+            font-family: 'Palatino Linotype', 'Book Antiqua', Palatino, serif;
+            min-height: 100vh;
+        }
+
+        /* ── Shared layout ── */
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 0 20px;
+        }
+        header {
+            text-align: center;
+            margin-bottom: 10px;
+            padding: 5px 20px;
+            position: relative;
+        }
+        .header-nav-btns {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            width: max-content;
+        }
+        .nav-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 16px;
+            font-size: 0.9em;
+            font-family: 'Palatino Linotype', 'Book Antiqua', Palatino, serif;
+            white-space: nowrap;
+            width: 100%;
+            box-sizing: border-box;
+            border-radius: 4px;
+            border: 2px solid #7d6a4d;
+            background: linear-gradient(135deg, rgba(61,48,32,0.8), rgba(40,32,20,0.8));
+            color: #f8e6c8;
+            text-decoration: none;
+            cursor: pointer;
+            letter-spacing: 1px;
+            text-shadow: 1px 1px 2px rgba(0,0,0,0.8);
+            transition: border-color 0.2s, background 0.2s;
+        }
+        .nav-btn:hover { border-color: #9d8a6d; background: linear-gradient(135deg, rgba(81,68,52,0.9), rgba(60,52,40,0.9)); }
+        .nav-btn-vault {
+            background: linear-gradient(135deg, rgba(80,40,120,0.85), rgba(50,20,80,0.85));
+            border-color: #a060e0;
+            color: #e8d0ff;
+        }
+        .nav-btn-vault:hover { border-color: #c090ff; background: linear-gradient(135deg, rgba(100,60,150,0.95), rgba(70,40,110,0.95)); }
+        .nav-btn-roster {
+            background: linear-gradient(135deg, rgba(100,80,20,0.85), rgba(70,55,10,0.85));
+            border-color: #c8a020; color: #ffe680;
+        }
+        .nav-btn-roster:hover { border-color: #ffe680; background: linear-gradient(135deg, rgba(130,105,30,0.9), rgba(90,70,15,0.9)); }
+        .nav-btn-prof {
+            background: linear-gradient(135deg, rgba(20,70,50,0.85), rgba(10,50,35,0.85));
+            border-color: #20c87a; color: #80ffcc;
+        }
+        .nav-btn-prof:hover { border-color: #80ffcc; background: linear-gradient(135deg, rgba(30,100,65,0.9), rgba(15,70,45,0.9)); }
+        .logo { max-width: 350px; height: auto; filter: drop-shadow(0 4px 8px rgba(0,0,0,0.5)); margin-bottom: 5px; }
+        .github-link {
+            position: absolute; top: 14px; right: 18px;
+            opacity: 0.6; transition: opacity 0.2s, transform 0.2s;
+        }
+        .github-link:hover { opacity: 1; transform: scale(1.1); }
+        .github-link svg { width: 28px; height: 28px; fill: #d4c5a0; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5)); }
+
+        /* ── Page layout ── */
+        .page-wrap {
+            max-width: 100%;
+            margin: 0 auto;
+            padding: 32px 32px 60px;
+        }
+        .page-title {
+            text-align: center;
+            font-size: 1.8em;
+            color: #f8e6c8;
+            text-shadow: 0 2px 8px rgba(0,0,0,0.8);
+            letter-spacing: 2px;
+            margin-bottom: 6px;
+        }
+        .page-subtitle {
+            text-align: center;
+            color: #a08060;
+            font-size: 0.95em;
+            margin-bottom: 28px;
+        }
+
+        /* ── Section tabs ── */
+        .tabs {
+            display: flex;
+            gap: 8px;
+            justify-content: center;
+            flex-wrap: wrap;
+            margin-bottom: 28px;
+        }
+        .tab-btn {
+            padding: 7px 18px;
+            border-radius: 4px;
+            border: 1px solid #3a2a10;
+            background: rgba(30,20,8,0.8);
+            color: #a08060;
+            font-family: inherit;
+            font-size: 0.9em;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .tab-btn:hover { border-color: #6a5030; color: #f8e6c8; }
+        .tab-btn.active {
+            border-color: #20c87a;
+            background: rgba(20,70,50,0.5);
+            color: #80ffcc;
+        }
+
+        /* ── Matrix table ── */
+        .matrix-wrap {
+            overflow-x: auto;
+            border-radius: 6px;
+            border: 1px solid #3a2a10;
+            background: rgba(15,10,5,0.7);
+        }
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            min-width: unset;
+        }
+        thead th {
+            background: rgba(30,20,8,0.95);
+            border-bottom: 2px solid #3a2a10;
+            padding: 10px 10px;
+            text-align: left;
+            font-size: 0.82em;
+            color: #a08060;
+            letter-spacing: 0.5px;
+            white-space: nowrap;
+        }
+        thead th:first-child {
+            min-width: 160px;
+            color: #c8b080;
+            font-size: 0.85em;
+        }
+        thead th.prof-header {
+            text-align: center;
+            min-width: 100px;
+        }
+        tbody tr {
+            border-bottom: 1px solid rgba(58,42,16,0.4);
+            transition: background 0.1s;
+        }
+        tbody tr:hover { background: rgba(50,35,12,0.4); }
+        tbody tr:last-child { border-bottom: none; }
+        .char-cell {
+            padding: 10px 14px;
+            white-space: nowrap;
+        }
+        .char-name-link {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            text-decoration: none;
+            color: inherit;
+        }
+        .char-portrait-sm {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            border: 1px solid #3a2a10;
+            object-fit: cover;
+            flex-shrink: 0;
+        }
+        .char-portrait-placeholder-sm {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background: rgba(58,42,16,0.5);
+            border: 1px solid #3a2a10;
+            flex-shrink: 0;
+        }
+        .class-icon-sm {
+            width: 18px;
+            height: 18px;
+            flex-shrink: 0;
+        }
+        .char-name-text { font-size: 0.95em; color: #f8e6c8; }
+        .char-realm-text { font-size: 0.78em; color: #705040; }
+        .prof-cell {
+            text-align: center;
+            padding: 8px 6px;
+            vertical-align: middle;
+        }
+        /* Skill bar pill */
+        .skill-pill {
+            display: inline-flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 3px;
+            min-width: 80px;
+            width: 100%;
+        }
+        .skill-bar-track {
+            width: 100%;
+            height: 6px;
+            background: rgba(58,42,16,0.6);
+            border-radius: 3px;
+            overflow: hidden;
+        }
+        .skill-bar-fill {
+            height: 100%;
+            border-radius: 3px;
+            background: linear-gradient(90deg, #20c87a, #80ffcc);
+            transition: width 0.3s;
+        }
+        .skill-bar-fill.maxed {
+            background: linear-gradient(90deg, #c8a020, #ffe680);
+        }
+        .skill-bar-fill.old-xpac {
+            background: linear-gradient(90deg, #5a5a7a, #9090bb);
+        }
+        .skill-text {
+            font-size: 0.78em;
+            color: #c0a880;
+            white-space: nowrap;
+        }
+        .skill-text.maxed { color: #ffe680; }
+        .skill-text.old-xpac { color: #9090bb; }
+        .tier-name {
+            font-size: 0.68em;
+            color: #706050;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 120px;
+        }
+        .tier-name.current { color: #20c87a; }
+        /* Empty cell dash */
+        .no-prof { color: #3a2a10; font-size: 1.1em; }
+        /* Secondary badge */
+        .sec-badge {
+            display: inline-block;
+            font-size: 0.65em;
+            background: rgba(40,30,60,0.7);
+            border: 1px solid #5050a0;
+            color: #9090cc;
+            border-radius: 3px;
+            padding: 1px 5px;
+            margin-left: 4px;
+            vertical-align: middle;
+        }
+
+        /* ── Character cards section (mobile fallback) ── */
+        .section-hidden { display: none; }
+    </style>
+</head>
+<body>
+<div class="container">
+<header>
+    <a href="https://github.com/MichaelCade/wow_stats" target="_blank" rel="noopener" class="github-link" title="View on GitHub">
+        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
+    </a>
+    <div class="header-nav-btns">
+        <a href="/" class="nav-btn">🏠 Home</a>
+        <a href="/vault" class="nav-btn nav-btn-vault">
+            <img src="/images/vault-button.png" style="width:20px;height:20px;flex-shrink:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
+            Great Vault
+        </a>
+        <a href="/roster" class="nav-btn nav-btn-roster">
+            <img src="/images/quest.png" style="width:20px;height:20px;flex-shrink:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
+            Weekly Roster
+        </a>
+        <a href="/professions" class="nav-btn nav-btn-prof">
+            <img src="/images/professions.png" style="width:20px;height:20px;flex-shrink:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
+            Professions
+        </a>
+    </div>
+    <img src="/images/World-of-Warcraft-Logo-2001.png" alt="World of Warcraft" class="logo">
+</header>
+</div>
+
+<div class="page-wrap">
+    <div class="page-title">
+        <img src="/images/professions.png" alt="" style="width:36px;height:36px;vertical-align:middle;margin-right:10px;filter:drop-shadow(0 2px 6px rgba(0,0,0,0.6));">Profession Tracker
+    </div>
+    <div class="page-subtitle">Primary &amp; secondary professions across your Warband</div>
+
+    <div class="tabs" id="tabs">
+        <button class="tab-btn active" data-tab="primary">Primary Professions</button>
+        <button class="tab-btn" data-tab="secondary">Secondary Professions</button>
+        <button class="tab-btn" data-tab="all">All Tiers (History)</button>
+    </div>
+
+    <!-- Character profession data embedded for JS -->
+    <div id="prof-data-store" style="display:none">
+        {{range .Characters}}{{if not .Error}}
+        <span
+            data-name="{{.Name}}"
+            data-realm="{{.Realm}}"
+            data-class="{{lower .Class}}"
+            data-thumb="{{.ThumbnailURL}}"
+            data-level="{{.Level}}"
+            data-profs='{{range $i, $p := .Professions}}{{if $i}};{{end}}{{$p.Name}}|{{if $p.IsSecondary}}1{{else}}0{{end}}|{{range $j, $t := $p.Tiers}}{{if $j}},{{end}}{{$t.TierName}}~{{$t.Skill}}~{{$t.Max}}{{end}}{{end}}'
+        ></span>
+        {{end}}{{end}}
+    </div>
+
+    <div class="matrix-wrap">
+        <table id="prof-table">
+            <thead id="prof-thead"><tr><th>Character</th></tr></thead>
+            <tbody id="prof-tbody"></tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+(function() {
+    // ── Parse character + profession data from DOM ──
+    const chars = [];
+    document.querySelectorAll('#prof-data-store span').forEach(el => {
+        const profsRaw = el.dataset.profs || '';
+        const professions = [];
+        if (profsRaw) {
+            profsRaw.split(';').forEach(pStr => {
+                const parts = pStr.split('|');
+                if (parts.length < 3) return;
+                const name = parts[0];
+                const isSecondary = parts[1] === '1';
+                const tiers = [];
+                if (parts[2]) {
+                    parts[2].split(',').forEach(tStr => {
+                        const tp = tStr.split('~');
+                        tiers.push({
+                            tierName: tp[0] || '',
+                            skill: parseInt(tp[1]) || 0,
+                            max: parseInt(tp[2]) || 0,
+                        });
+                    });
+                }
+                professions.push({ name, isSecondary, tiers });
+            });
+        }
+        chars.push({
+            name:    el.dataset.name,
+            realm:   el.dataset.realm,
+            cls:     el.dataset.class,
+            thumb:   el.dataset.thumb,
+            level:   parseInt(el.dataset.level) || 0,
+            professions,
+        });
+    });
+
+    // ── Collect unique profession names per tab ──
+    function getProfNames(secondary, allTiers) {
+        const set = new Set();
+        chars.forEach(c => c.professions.forEach(p => {
+            if (allTiers || p.isSecondary === secondary) set.add(p.name);
+        }));
+        return [...set].sort();
+    }
+
+    // ── Determine if a tier is the current expansion ──
+    // The last tier in the array is always the most recent one.
+    function currentTier(prof) {
+        if (!prof.tiers.length) return null;
+        return prof.tiers[prof.tiers.length - 1];
+    }
+
+    // ── Build the table ──
+    function buildTable(mode) {
+        const thead = document.getElementById('prof-thead');
+        const tbody = document.getElementById('prof-tbody');
+
+        let profNames;
+        if (mode === 'secondary') {
+            profNames = getProfNames(true, false);
+        } else if (mode === 'all') {
+            profNames = getProfNames(false, true); // all professions, primary + secondary
+        } else {
+            profNames = getProfNames(false, false);
+        }
+
+        // Header row
+        thead.innerHTML = '';
+        const hr = document.createElement('tr');
+        const thChar = document.createElement('th');
+        thChar.textContent = 'Character';
+        hr.appendChild(thChar);
+        profNames.forEach(pn => {
+            const th = document.createElement('th');
+            th.className = 'prof-header';
+            th.textContent = pn;
+            hr.appendChild(th);
+        });
+        thead.appendChild(hr);
+
+        // Body rows
+        tbody.innerHTML = '';
+
+        // Sort characters: max-level first, then by name
+        const sorted = [...chars].sort((a, b) => b.level - a.level || a.name.localeCompare(b.name));
+
+        sorted.forEach(char => {
+            const tr = document.createElement('tr');
+
+            // Character cell
+            const tdChar = document.createElement('td');
+            tdChar.className = 'char-cell';
+            const nameLink = document.createElement('div');
+            nameLink.className = 'char-name-link';
+
+            if (char.thumb) {
+                const img = document.createElement('img');
+                img.className = 'char-portrait-sm';
+                img.src = char.thumb;
+                img.alt = char.name;
+                img.onerror = function() { this.replaceWith(makePlaceholder()); };
+                nameLink.appendChild(img);
+            } else {
+                nameLink.appendChild(makePlaceholder());
+            }
+
+            const clsImg = document.createElement('img');
+            clsImg.className = 'class-icon-sm';
+            clsImg.src = '/images/' + char.cls + '.png';
+            clsImg.alt = char.cls;
+            clsImg.onerror = function() { this.style.display='none'; };
+            nameLink.appendChild(clsImg);
+
+            const nameDiv = document.createElement('div');
+            const nameText = document.createElement('div');
+            nameText.className = 'char-name-text';
+            nameText.textContent = char.name;
+            const realmText = document.createElement('div');
+            realmText.className = 'char-realm-text';
+            realmText.textContent = char.realm + ' · ' + char.level;
+            nameDiv.appendChild(nameText);
+            nameDiv.appendChild(realmText);
+            nameLink.appendChild(nameDiv);
+            tdChar.appendChild(nameLink);
+            tr.appendChild(tdChar);
+
+            // Profession cells
+            profNames.forEach(pn => {
+                const td = document.createElement('td');
+                td.className = 'prof-cell';
+
+                const matchedProf = char.professions.find(p => p.name === pn);
+                if (!matchedProf) {
+                    const dash = document.createElement('span');
+                    dash.className = 'no-prof';
+                    dash.textContent = '—';
+                    td.appendChild(dash);
+                } else if (mode === 'all') {
+                    // Show all expansion tiers stacked
+                    matchedProf.tiers.forEach((t, idx) => {
+                        const isCurrent = idx === matchedProf.tiers.length - 1;
+                        const pill = makeSkillPill(t, isCurrent, true);
+                        td.appendChild(pill);
+                    });
+                    if (matchedProf.tiers.length === 0) {
+                        const dash = document.createElement('span');
+                        dash.className = 'no-prof';
+                        dash.textContent = '—';
+                        td.appendChild(dash);
+                    }
+                } else {
+                    // Show current tier only
+                    const ct = currentTier(matchedProf);
+                    if (ct) {
+                        td.appendChild(makeSkillPill(ct, true, false));
+                    } else {
+                        const dash = document.createElement('span');
+                        dash.className = 'no-prof';
+                        dash.textContent = '?';
+                        td.appendChild(dash);
+                    }
+                }
+
+                tr.appendChild(td);
+            });
+
+            tbody.appendChild(tr);
+        });
+    }
+
+    function makeSkillPill(tier, isCurrent, showTierName) {
+        const pill = document.createElement('div');
+        pill.className = 'skill-pill';
+
+        if (showTierName && tier.tierName) {
+            const tn = document.createElement('div');
+            tn.className = 'tier-name' + (isCurrent ? ' current' : '');
+            tn.textContent = tier.tierName;
+            tn.title = tier.tierName;
+            pill.appendChild(tn);
+        }
+
+        if (tier.max > 0) {
+            const pct = Math.min(100, Math.round((tier.skill / tier.max) * 100));
+            const isMaxed = tier.skill >= tier.max;
+
+            const track = document.createElement('div');
+            track.className = 'skill-bar-track';
+            const fill = document.createElement('div');
+            fill.className = 'skill-bar-fill' + (isMaxed ? ' maxed' : (!isCurrent ? ' old-xpac' : ''));
+            fill.style.width = pct + '%';
+            track.appendChild(fill);
+            pill.appendChild(track);
+
+            const txt = document.createElement('div');
+            txt.className = 'skill-text' + (isMaxed ? ' maxed' : (!isCurrent ? ' old-xpac' : ''));
+            txt.textContent = tier.skill + ' / ' + tier.max;
+            pill.appendChild(txt);
+        } else {
+            const txt = document.createElement('div');
+            txt.className = 'skill-text';
+            txt.textContent = 'learned';
+            pill.appendChild(txt);
+        }
+
+        return pill;
+    }
+
+    function makePlaceholder() {
+        const d = document.createElement('div');
+        d.className = 'char-portrait-placeholder-sm';
+        return d;
+    }
+
+    // ── Tab switching ──
+    let currentMode = 'primary';
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            currentMode = btn.dataset.tab;
+            buildTable(currentMode);
+        });
+    });
+
+    buildTable('primary');
+})();
+</script>
+</body>
+</html>
+`
+
 var rosterTemplate = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -795,13 +1403,84 @@ var rosterTemplate = `<!DOCTYPE html>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
-            background: #0a0e17;
+            background: linear-gradient(to bottom, #0a0e1a 0%, #1a1f2e 50%, #0f1419 100%);
             color: #f8e6c8;
             font-family: 'Palatino Linotype', 'Book Antiqua', Palatino, serif;
             min-height: 100vh;
             padding: 20px;
-            background-image: radial-gradient(ellipse at top, #1a1f2e 0%, #0a0e17 70%);
         }
+
+        /* ── SHARED HEADER ── */
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 0 20px;
+        }
+        header {
+            text-align: center;
+            margin-bottom: 20px;
+            padding: 5px 20px;
+            position: relative;
+        }
+        .github-link {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            opacity: 0.6;
+            transition: opacity 0.2s ease, transform 0.2s ease;
+        }
+        .github-link:hover { opacity: 1; transform: scale(1.1); }
+        .github-link svg { width: 28px; height: 28px; fill: #d4c5a0; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5)); }
+        .header-nav-btns {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            width: max-content;
+        }
+        .nav-btn {
+            display: inline-flex;
+            align-items: center;
+            padding: 10px 16px;
+            font-size: 0.9em;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            white-space: nowrap;
+            width: 100%;
+            box-sizing: border-box;
+            border-radius: 4px;
+            border: 2px solid #7d6a4d;
+            background: linear-gradient(135deg, rgba(61,48,32,0.8), rgba(40,32,20,0.8));
+            color: #f8e6c8;
+            text-decoration: none;
+            font-family: inherit;
+            cursor: pointer;
+            letter-spacing: 1px;
+            text-shadow: 1px 1px 2px rgba(0,0,0,0.8);
+        }
+        .nav-btn:hover { border-color: #9d8a6d; background: linear-gradient(135deg, rgba(81,68,52,0.9), rgba(60,52,40,0.9)); }
+        .nav-btn-vault {
+            background: linear-gradient(135deg, rgba(80,40,120,0.85), rgba(50,20,80,0.85));
+            border-color: #a060e0;
+            color: #e8d0ff;
+        }
+        .nav-btn-vault:hover { border-color: #c090ff; background: linear-gradient(135deg, rgba(100,60,150,0.95), rgba(70,40,110,0.95)); }
+        .nav-btn-roster {
+            background: linear-gradient(135deg, rgba(100,80,20,0.85), rgba(70,55,10,0.85));
+            border-color: #c8a020;
+            color: #ffe680;
+        }
+        .nav-btn-roster:hover { border-color: #ffe680; background: linear-gradient(135deg, rgba(130,105,30,0.9), rgba(90,70,15,0.9)); }
+        .nav-btn-prof {
+            background: linear-gradient(135deg, rgba(20,70,50,0.85), rgba(10,50,35,0.85));
+            border-color: #20c87a;
+            color: #80ffcc;
+        }
+        .nav-btn-prof:hover { border-color: #80ffcc; background: linear-gradient(135deg, rgba(30,100,65,0.9), rgba(15,70,45,0.9)); }
+        .logo { max-width: 350px; height: auto; filter: drop-shadow(0 4px 8px rgba(0,0,0,0.5)); margin-bottom: 5px; }
 
         /* ── PAGE HEADER ── */
         .page-header {
@@ -825,23 +1504,6 @@ var rosterTemplate = `<!DOCTYPE html>
             font-size: 0.95em;
             margin-top: 6px;
         }
-
-        /* ── BACK BUTTON ── */
-        .back-btn {
-            display: inline-block;
-            margin-bottom: 20px;
-            background: linear-gradient(135deg, rgba(61,48,32,0.8), rgba(40,32,20,0.8));
-            border: 2px solid #7d6a4d;
-            color: #f8e6c8;
-            padding: 10px 24px;
-            border-radius: 6px;
-            text-decoration: none;
-            font-family: inherit;
-            font-size: 0.95em;
-            letter-spacing: 1px;
-            transition: all 0.2s;
-        }
-        .back-btn:hover { border-color: #c8a96e; color: #ffe680; }
 
         /* ── QUEST LOG FRAME ── */
         .quest-log {
@@ -1081,7 +1743,29 @@ var rosterTemplate = `<!DOCTYPE html>
     </style>
 </head>
 <body>
-    <a href="/" class="back-btn">← Back to Characters</a>
+<div class="container">
+    <header>
+        <a href="https://github.com/MichaelCade/wow_stats" target="_blank" rel="noopener" class="github-link" title="View on GitHub">
+            <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
+        </a>
+        <div class="header-nav-btns">
+            <a href="/" class="nav-btn">🏠 Home</a>
+            <a href="/vault" class="nav-btn nav-btn-vault">
+                <img src="/images/vault-button.png" style="width:20px;height:20px;flex-shrink:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
+                Great Vault
+            </a>
+            <a href="/roster" class="nav-btn nav-btn-roster">
+                <img src="/images/quest.png" style="width:20px;height:20px;flex-shrink:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
+                Weekly Roster
+            </a>
+            <a href="/professions" class="nav-btn nav-btn-prof">
+                <img src="/images/professions.png" style="width:20px;height:20px;flex-shrink:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
+                Professions
+            </a>
+        </div>
+        <img src="/images/World-of-Warcraft-Logo-2001.png" alt="World of Warcraft" class="logo">
+    </header>
+</div>
 
     <div class="page-header">
         <img src="/images/quest.png" alt="Weekly Roster" class="roster-logo">
@@ -1372,13 +2056,83 @@ var vaultTemplate = `<!DOCTYPE html>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
-            background: #0a0e17;
+            background: linear-gradient(to bottom, #0a0e1a 0%, #1a1f2e 50%, #0f1419 100%);
             color: #f8e6c8;
             font-family: 'Palatino Linotype', 'Book Antiqua', Palatino, serif;
             min-height: 100vh;
             padding: 20px;
-            background-image: radial-gradient(ellipse at top, #1a1f2e 0%, #0a0e17 70%);
         }
+
+        /* ── SHARED HEADER ── */
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 0 20px;
+        }
+        header {
+            text-align: center;
+            margin-bottom: 20px;
+            padding: 5px 20px;
+            position: relative;
+        }
+        .github-link {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            opacity: 0.6;
+            transition: opacity 0.2s ease, transform 0.2s ease;
+        }
+        .github-link:hover { opacity: 1; transform: scale(1.1); }
+        .github-link svg { width: 28px; height: 28px; fill: #d4c5a0; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5)); }
+        .header-nav-btns {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            width: max-content;
+        }
+        .nav-btn {
+            display: inline-flex;
+            align-items: center;
+            padding: 10px 16px;
+            font-size: 0.9em;
+            gap: 8px;
+            white-space: nowrap;
+            width: 100%;
+            box-sizing: border-box;
+            border-radius: 4px;
+            border: 2px solid #7d6a4d;
+            background: linear-gradient(135deg, rgba(61,48,32,0.8), rgba(40,32,20,0.8));
+            color: #f8e6c8;
+            text-decoration: none;
+            font-family: inherit;
+            cursor: pointer;
+            letter-spacing: 1px;
+            text-shadow: 1px 1px 2px rgba(0,0,0,0.8);
+        }
+        .nav-btn:hover { border-color: #9d8a6d; background: linear-gradient(135deg, rgba(81,68,52,0.9), rgba(60,52,40,0.9)); }
+        .nav-btn-vault {
+            background: linear-gradient(135deg, rgba(80,40,120,0.85), rgba(50,20,80,0.85));
+            border-color: #a060e0;
+            color: #e8d0ff;
+        }
+        .nav-btn-vault:hover { border-color: #c090ff; background: linear-gradient(135deg, rgba(100,60,150,0.95), rgba(70,40,110,0.95)); }
+        .nav-btn-roster {
+            background: linear-gradient(135deg, rgba(100,80,20,0.85), rgba(70,55,10,0.85));
+            border-color: #c8a020;
+            color: #ffe680;
+        }
+        .nav-btn-roster:hover { border-color: #ffe680; background: linear-gradient(135deg, rgba(130,105,30,0.9), rgba(90,70,15,0.9)); }
+        .nav-btn-prof {
+            background: linear-gradient(135deg, rgba(20,70,50,0.85), rgba(10,50,35,0.85));
+            border-color: #20c87a;
+            color: #80ffcc;
+        }
+        .nav-btn-prof:hover { border-color: #80ffcc; background: linear-gradient(135deg, rgba(30,100,65,0.9), rgba(15,70,45,0.9)); }
+        .logo { max-width: 350px; height: auto; filter: drop-shadow(0 4px 8px rgba(0,0,0,0.5)); margin-bottom: 5px; }
+
         .page-header {
             text-align: center;
             margin-bottom: 30px;
@@ -1400,21 +2154,6 @@ var vaultTemplate = `<!DOCTYPE html>
             font-size: 0.95em;
             margin-top: 6px;
         }
-        .back-btn {
-            display: inline-block;
-            margin-bottom: 20px;
-            background: linear-gradient(135deg, rgba(61,48,32,0.8), rgba(40,32,20,0.8));
-            border: 2px solid #7d6a4d;
-            color: #f8e6c8;
-            padding: 10px 24px;
-            border-radius: 6px;
-            text-decoration: none;
-            font-family: inherit;
-            font-size: 0.95em;
-            letter-spacing: 1px;
-            transition: all 0.2s;
-        }
-        .back-btn:hover { border-color: #9d8a6d; transform: translateY(-1px); }
 
         .vault-layout {
             display: flex;
@@ -1666,7 +2405,29 @@ var vaultTemplate = `<!DOCTYPE html>
     </style>
 </head>
 <body>
-    <a href="/" class="back-btn">← Back to Characters</a>
+<div class="container">
+    <header>
+        <a href="https://github.com/MichaelCade/wow_stats" target="_blank" rel="noopener" class="github-link" title="View on GitHub">
+            <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
+        </a>
+        <div class="header-nav-btns">
+            <a href="/" class="nav-btn">🏠 Home</a>
+            <a href="/vault" class="nav-btn nav-btn-vault">
+                <img src="/images/vault-button.png" style="width:20px;height:20px;flex-shrink:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
+                Great Vault
+            </a>
+            <a href="/roster" class="nav-btn nav-btn-roster">
+                <img src="/images/quest.png" style="width:20px;height:20px;flex-shrink:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
+                Weekly Roster
+            </a>
+            <a href="/professions" class="nav-btn nav-btn-prof">
+                <img src="/images/professions.png" style="width:20px;height:20px;flex-shrink:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
+                Professions
+            </a>
+        </div>
+        <img src="/images/World-of-Warcraft-Logo-2001.png" alt="World of Warcraft" class="logo">
+    </header>
+</div>
 
     <div class="page-header">
         <img src="/images/vault-button.png" alt="Great Vault" class="vault-logo">
@@ -2097,26 +2858,45 @@ const htmlTemplate = `
             gap: 8px;
             width: max-content;
         }
-        .header-vault-btn,
-        .header-roster-btn {
-            padding: 10px 16px;
-            font-size: 0.9em;
-            display: flex;
+        .nav-btn {
+            display: inline-flex;
             align-items: center;
             gap: 8px;
+            padding: 10px 16px;
+            font-size: 0.9em;
+            font-family: 'Palatino Linotype', 'Book Antiqua', Palatino, serif;
             white-space: nowrap;
             width: 100%;
             box-sizing: border-box;
+            border-radius: 4px;
+            border: 2px solid #7d6a4d;
+            background: linear-gradient(135deg, rgba(61,48,32,0.8), rgba(40,32,20,0.8));
+            color: #f8e6c8;
+            text-decoration: none;
+            cursor: pointer;
+            letter-spacing: 1px;
+            text-shadow: 1px 1px 2px rgba(0,0,0,0.8);
+            transition: border-color 0.2s, background 0.2s;
         }
-        .header-roster-btn {
+        .nav-btn:hover { border-color: #9d8a6d; background: linear-gradient(135deg, rgba(81,68,52,0.9), rgba(60,52,40,0.9)); }
+        .nav-btn-vault {
+            background: linear-gradient(135deg, rgba(80,40,120,0.85), rgba(50,20,80,0.85));
+            border-color: #a060e0;
+            color: #e8d0ff;
+        }
+        .nav-btn-vault:hover { border-color: #c090ff; background: linear-gradient(135deg, rgba(100,60,150,0.95), rgba(70,40,110,0.95)); }
+        .nav-btn-roster {
             background: linear-gradient(135deg, rgba(100,80,20,0.85), rgba(70,55,10,0.85));
             border-color: #c8a020;
             color: #ffe680;
         }
-        .header-roster-btn:hover {
-            border-color: #ffe680;
-            background: linear-gradient(135deg, rgba(130,105,30,0.9), rgba(90,70,15,0.9));
+        .nav-btn-roster:hover { border-color: #ffe680; background: linear-gradient(135deg, rgba(130,105,30,0.9), rgba(90,70,15,0.9)); }
+        .nav-btn-prof {
+            background: linear-gradient(135deg, rgba(20,70,50,0.85), rgba(10,50,35,0.85));
+            border-color: #20c87a;
+            color: #80ffcc;
         }
+        .nav-btn-prof:hover { border-color: #80ffcc; background: linear-gradient(135deg, rgba(30,100,65,0.9), rgba(15,70,45,0.9)); }
         .logo {
             max-width: 350px;
             height: auto;
@@ -2554,13 +3334,17 @@ const htmlTemplate = `
             </a>
             {{if .Authenticated}}
             <div class="header-nav-btns">
-                <a href="/vault" class="btn btn-vault header-vault-btn">
-                    <img src="/images/vault-button.png" alt="Vault" style="width:22px;height:22px;flex-shrink:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
+                <a href="/vault" class="nav-btn nav-btn-vault">
+                    <img src="/images/vault-button.png" alt="Vault" style="width:20px;height:20px;flex-shrink:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
                     Great Vault
                 </a>
-                <a href="/roster" class="btn btn-vault header-roster-btn">
-                    <img src="/images/quest.png" alt="Roster" style="width:22px;height:22px;flex-shrink:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
+                <a href="/roster" class="nav-btn nav-btn-roster">
+                    <img src="/images/quest.png" alt="Roster" style="width:20px;height:20px;flex-shrink:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
                     Weekly Roster
+                </a>
+                <a href="/professions" class="nav-btn nav-btn-prof">
+                    <img src="/images/professions.png" alt="Professions" style="width:20px;height:20px;flex-shrink:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
+                    Professions
                 </a>
             </div>
             {{end}}
@@ -2747,7 +3531,7 @@ const htmlTemplate = `
                     <div class="professions-list">
                         <strong>Professions:</strong><br>
                         {{range .Professions}}
-                        <div class="profession-item">• {{.Name}} {{if .Max}}({{.Tier}}/{{.Max}}){{end}}</div>
+                        <div class="profession-item">• {{.Name}} {{with .CurrentTier}}{{if .Max}}({{.Skill}}/{{.Max}}){{end}}{{end}}</div>
                         {{end}}
                     </div>
                     {{else}}
