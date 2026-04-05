@@ -1,20 +1,50 @@
 # WoW Character Stats Tracker
 
-A self-hosted World of Warcraft character dashboard that uses the official Battle.net API to display stats across all characters on your account.
+A self-hosted World of Warcraft character dashboard that uses the official Battle.net API to display stats and track weekly activities across all characters on your account.
 
 ![WoW Stats Tracker Preview](example.png)
 
 ## Features
 
-- 🏆 **All Characters** — Automatically discovers every character on your account
-- 💰 **Gold Tracking** — Per-character gold and total account gold
-- ⚔️ **Level & Item Level** — Sorted by level and item level (descending)
-- 🛡️ **Faction** — Alliance/Horde display with logos
-- 🧙 **Race & Class** — With class icons
-- 🖼️ **Character Portraits** — Pulls avatars from the Blizzard media API
-- 🕐 **Last Played** — Human-readable "last seen" timestamps
-- 🔨 **Professions** — Primary professions with skill level
-- 🌍 **Multi-region** — Supports US, EU, KR, TW regions
+### � Home — Character Dashboard
+- **All Characters** — Automatically discovers every character on your account
+- **Account Summary** — Total gold, mount count, pet count, and Horde/Alliance breakdown at a glance
+- **Character Cards** — Portrait, level, item level, race, class (with icon), faction, and last played timestamp
+- **Gold Tracking** — Per-character gold and formatted total account gold
+- **Sorted Display** — Characters ordered by level then item level (descending)
+- **Raid Progress** — Current tier raid progress (Normal / Heroic / Mythic) per character
+- **Dungeon & Delve Info** — Mythic+ and Delve completion tracking per character
+
+### 🔒 Great Vault (`/vault`)
+- **Drag-and-drop interface** — Drag characters from your roster onto vault slots
+- **Three activity tracks** — Raid (3 slots), Mythic+ Dungeons (3 slots), Delves (3 slots)
+- **Persistent state** — Slot assignments saved to `localStorage` and survive page refreshes
+- **Cross-tab sync** — Vault state updates instantly across multiple open tabs
+- **Visual feedback** — Character portrait and class icon shown in each filled slot
+
+### 📋 Weekly Roster (`/roster`)
+- **Quest-log style layout** — Weekly tasks per character in a scrollable list
+- **Task tracking** — Great Vault slots, raid bosses, dungeons, and delves
+- **Manual check-offs** — Mark tasks complete with a click; state persists in `localStorage`
+- **Vault integration** — Characters dragged into the Great Vault page auto-complete their vault tasks here
+- **Warband view** — All eligible characters (level 90+) shown in one place
+
+### ⚒️ Profession Tracker (`/professions`)
+- **Full profession matrix** — All characters as columns, all professions as rows
+- **Three tabs** — Primary Professions / Secondary Professions / All Tiers (expansion history)
+- **Skill bars** — Visual progress bar per expansion tier with the tier name shown on hover
+- **Maxed highlighting** — Skill bars turn gold when a profession is maxed
+- **All expansion tiers** — Shows every expansion's profession tier, not just current
+- **Secondary professions** — Cooking, Fishing, Archaeology and other secondaries tracked separately
+
+### 🌐 General
+- **Battle.net OAuth2** — Secure login; no passwords stored
+- **Parallel API fetching** — All character data fetched concurrently for fast load times
+- **Auto-refresh** — Page polls until character data is ready after first login
+- **Consistent navigation** — Shared header with logo and colour-coded nav buttons on every page
+- **Multi-region support** — US, EU, KR, TW regions configurable via environment variable
+
+---
 
 ## Prerequisites
 
@@ -76,15 +106,31 @@ Then open [http://localhost:8081](http://localhost:8081) in your browser and cli
 
 ---
 
+## Pages & Routes
+
+| Route | Description |
+|-------|-------------|
+| `/` | Home — character dashboard with account summary |
+| `/vault` | Great Vault tracker — drag-and-drop weekly slot planner |
+| `/roster` | Weekly Roster — per-character weekly task checklist |
+| `/professions` | Profession Tracker — cross-character profession skill matrix |
+| `/refresh` | Force re-fetch of all character data from Battle.net |
+
+---
+
 ## How It Works
 
 1. You click **Login with Battle.net** — you are redirected to Blizzard's OAuth page
 2. After authorising, the app fetches all characters on your account automatically
 3. For each character it calls multiple API endpoints in parallel:
-   - Public profile (level, item level, race, class, faction, last login, professions)
+   - Public profile (level, item level, race, class, faction, last login)
    - Media API (character portrait/avatar)
    - Protected character endpoint (gold — requires OAuth)
+   - Profession data (all expansion tiers, primary and secondary)
+   - Raid progress (current tier, all difficulties)
+   - Mythic+ and Delve activity data
 4. Results are displayed sorted by level, then item level
+5. The Great Vault and Weekly Roster use `localStorage` — no server-side storage required
 
 ---
 
@@ -93,7 +139,7 @@ Then open [http://localhost:8081](http://localhost:8081) in your browser and cli
 - Your `.env` file is listed in `.gitignore` and will **never** be committed
 - Credentials are loaded from environment variables only — nothing is hardcoded
 - The OAuth token is held in memory only and is not persisted to disk
-- No database or external storage is used
+- No database or external storage is used — all state is stored client-side in `localStorage`
 
 ---
 
@@ -121,3 +167,6 @@ Then open [http://localhost:8081](http://localhost:8081) in your browser and cli
 
 **OAuth redirect error**
 → Make sure `http://localhost:8081/callback` is listed exactly as a Redirect URL in your Battle.net developer portal client settings.
+
+**Vault/Roster state lost after restart**
+→ The Great Vault and Weekly Roster use browser `localStorage` — clearing browser data will reset them. Server restarts have no effect on this state.
