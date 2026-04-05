@@ -119,6 +119,7 @@ func main() {
 	http.HandleFunc("/callback", handleCallback)
 	http.HandleFunc("/refresh", handleRefresh)
 	http.HandleFunc("/vault", handleVault)
+	http.HandleFunc("/roster", handleRoster)
 	http.HandleFunc("/api/stats", handleAPIStats)
 	http.HandleFunc("/debug/raids", handleDebugRaids)
 	http.HandleFunc("/debug/profile", handleDebugProfile)
@@ -766,6 +767,556 @@ func handleVault(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Vault template error: %v", err)
 	}
 }
+
+func handleRoster(w http.ResponseWriter, r *http.Request) {
+	summaryMutex.RLock()
+	summary := accountSummary
+	summaryMutex.RUnlock()
+
+	tmpl, err := template.New("roster").Funcs(template.FuncMap{
+		"lower": strings.ToLower,
+	}).Parse(rosterTemplate)
+	if err != nil {
+		http.Error(w, "Template error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := tmpl.Execute(w, summary); err != nil {
+		log.Printf("Roster template error: %v", err)
+	}
+}
+
+var rosterTemplate = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Weekly Reset Roster</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background: #0a0e17;
+            color: #f8e6c8;
+            font-family: 'Palatino Linotype', 'Book Antiqua', Palatino, serif;
+            min-height: 100vh;
+            padding: 20px;
+            background-image: radial-gradient(ellipse at top, #1a1f2e 0%, #0a0e17 70%);
+        }
+
+        /* ── PAGE HEADER ── */
+        .page-header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .page-header img.roster-logo {
+            width: 72px;
+            height: 72px;
+            filter: drop-shadow(0 0 14px rgba(255, 200, 80, 0.7));
+            margin-bottom: 10px;
+        }
+        .page-header h1 {
+            font-size: 2.2em;
+            color: #ffe680;
+            text-shadow: 0 0 20px rgba(255, 200, 80, 0.5), 2px 2px 6px rgba(0,0,0,0.8);
+            letter-spacing: 2px;
+        }
+        .page-header p {
+            color: #9b8a6e;
+            font-size: 0.95em;
+            margin-top: 6px;
+        }
+
+        /* ── BACK BUTTON ── */
+        .back-btn {
+            display: inline-block;
+            margin-bottom: 20px;
+            background: linear-gradient(135deg, rgba(61,48,32,0.8), rgba(40,32,20,0.8));
+            border: 2px solid #7d6a4d;
+            color: #f8e6c8;
+            padding: 10px 24px;
+            border-radius: 6px;
+            text-decoration: none;
+            font-family: inherit;
+            font-size: 0.95em;
+            letter-spacing: 1px;
+            transition: all 0.2s;
+        }
+        .back-btn:hover { border-color: #c8a96e; color: #ffe680; }
+
+        /* ── QUEST LOG FRAME ── */
+        .quest-log {
+            max-width: 960px;
+            margin: 0 auto;
+            background: linear-gradient(180deg, #1c160d 0%, #120f08 100%);
+            border: 3px solid #7d6a3a;
+            border-radius: 8px;
+            box-shadow: 0 0 40px rgba(0,0,0,0.8), inset 0 0 60px rgba(0,0,0,0.4);
+            overflow: hidden;
+        }
+        .quest-log-header {
+            background: linear-gradient(135deg, #2a1f0a, #1a130a);
+            border-bottom: 2px solid #7d6a3a;
+            padding: 14px 24px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .quest-log-header h2 {
+            font-size: 1.3em;
+            color: #ffe680;
+            letter-spacing: 2px;
+            text-shadow: 0 0 10px rgba(255, 200, 80, 0.4);
+        }
+        .quest-log-header .header-icon {
+            width: 28px;
+            height: 28px;
+            filter: drop-shadow(0 0 6px rgba(255,200,80,0.5));
+        }
+        .reset-note {
+            margin-left: auto;
+            font-size: 0.8em;
+            color: #9b8a6e;
+        }
+
+        /* ── CHARACTER ROW ── */
+        .char-row {
+            border-bottom: 1px solid rgba(125, 106, 58, 0.3);
+            padding: 14px 24px;
+            display: grid;
+            grid-template-columns: 220px 1fr;
+            gap: 16px;
+            align-items: start;
+            transition: background 0.2s;
+        }
+        .char-row:last-child { border-bottom: none; }
+        .char-row:hover { background: rgba(255,200,80,0.03); }
+
+        /* completed character */
+        .char-row.all-done .char-identity .char-name {
+            text-decoration: line-through;
+            text-decoration-color: rgba(255, 200, 80, 0.5);
+            opacity: 0.5;
+        }
+        .char-row.all-done .char-identity .char-meta {
+            opacity: 0.4;
+        }
+
+        /* ── CHARACTER IDENTITY ── */
+        .char-identity {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .char-portrait {
+            width: 44px;
+            height: 44px;
+            border-radius: 4px;
+            border: 2px solid #5a4a2a;
+            object-fit: cover;
+            flex-shrink: 0;
+        }
+        .char-portrait-placeholder {
+            width: 44px;
+            height: 44px;
+            border-radius: 4px;
+            border: 2px solid #5a4a2a;
+            background: rgba(90,74,42,0.3);
+            flex-shrink: 0;
+        }
+        .char-info .char-name {
+            font-size: 1.05em;
+            color: #f8e6c8;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+        .char-info .char-meta {
+            font-size: 0.78em;
+            color: #9b8a6e;
+            margin-top: 2px;
+            transition: all 0.3s;
+        }
+        .class-icon {
+            width: 20px;
+            height: 20px;
+            vertical-align: middle;
+            margin-right: 4px;
+            opacity: 0.85;
+        }
+
+        /* ── TASK LIST (quest objective style) ── */
+        .task-list {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .task-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 0.88em;
+            color: #c8b48a;
+            transition: all 0.3s;
+        }
+        .task-item.done {
+            text-decoration: line-through;
+            text-decoration-color: rgba(110, 231, 183, 0.6);
+            color: rgba(110, 231, 183, 0.55);
+        }
+        .task-icon {
+            width: 20px;
+            height: 20px;
+            flex-shrink: 0;
+            opacity: 0.7;
+        }
+        .task-item.done .task-icon {
+            opacity: 0.45;
+        }
+        .task-check {
+            width: 16px;
+            height: 16px;
+            border-radius: 3px;
+            border: 1px solid #5a4a2a;
+            background: rgba(30,20,10,0.6);
+            flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 11px;
+            color: #6ee7b7;
+            transition: all 0.2s;
+        }
+        .task-check.checked {
+            background: rgba(110,231,183,0.15);
+            border-color: #6ee7b7;
+        }
+        .task-label {
+            flex: 1;
+        }
+        .task-source {
+            font-size: 0.82em;
+            color: #7a6a4a;
+            margin-left: auto;
+            white-space: nowrap;
+        }
+        .task-item.done .task-source {
+            opacity: 0.4;
+        }
+
+        /* section header within task list */
+        .task-section-label {
+            font-size: 0.72em;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            color: #7a6a4a;
+            margin-top: 6px;
+            margin-bottom: 2px;
+            padding-bottom: 3px;
+            border-bottom: 1px solid rgba(125,106,58,0.25);
+        }
+
+        /* ── SUMMARY BAR ── */
+        .summary-bar {
+            background: linear-gradient(135deg, #1a130a, #120f08);
+            border-top: 2px solid #7d6a3a;
+            padding: 12px 24px;
+            display: flex;
+            gap: 24px;
+            align-items: center;
+            font-size: 0.85em;
+            color: #9b8a6e;
+        }
+        .summary-count {
+            color: #ffe680;
+            font-weight: bold;
+        }
+        .clear-roster-btn {
+            margin-left: auto;
+            background: linear-gradient(135deg, rgba(120,30,30,0.7), rgba(80,20,20,0.7));
+            border: 1px solid #a04040;
+            color: #ffaaaa;
+            padding: 6px 18px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 0.85em;
+            letter-spacing: 1px;
+            transition: all 0.2s;
+        }
+        .clear-roster-btn:hover { border-color: #e06060; background: rgba(160,40,40,0.8); }
+
+        .no-chars {
+            text-align: center;
+            padding: 40px;
+            color: #9b8a6e;
+        }
+    </style>
+</head>
+<body>
+    <a href="/" class="back-btn">← Back to Characters</a>
+
+    <div class="page-header">
+        <img src="/images/quest.png" alt="Weekly Roster" class="roster-logo">
+        <h1>Weekly Reset Roster</h1>
+        <p>Track your weekly tasks — vault slots auto-complete when you drag characters in the Great Vault</p>
+    </div>
+
+    {{if not .Authenticated}}
+    <div class="no-chars">
+        <p>Please <a href="/login" style="color:#ffe680;">log in</a> to use the roster.</p>
+    </div>
+    {{else if eq (len .Characters) 0}}
+    <div class="no-chars">
+        <p>No character data yet — go back and wait for data to load.</p>
+    </div>
+    {{else}}
+
+    <!-- Embed character data for JS -->
+    <div id="char-data-store" style="display:none">
+    {{range .Characters}}{{if ge .Level 90}}
+    <span data-key="{{.Name}}-{{.Realm}}"
+          data-name="{{.Name}}"
+          data-realm="{{.Realm}}"
+          data-class="{{lower .Class}}"
+          data-thumb="{{.ThumbnailURL}}"
+          data-faction="{{.Faction}}"
+          data-level="{{.Level}}"></span>
+    {{end}}{{end}}
+    </div>
+
+    <div class="quest-log" id="quest-log">
+        <div class="quest-log-header">
+            <img src="/images/quest.png" alt="Quest" class="header-icon">
+            <h2>Weekly Objectives</h2>
+            <span class="reset-note">Resets every Tuesday</span>
+        </div>
+
+        <!-- rows injected by JS -->
+        <div id="roster-rows"></div>
+
+        <div class="summary-bar">
+            <span>Characters fully done: <span class="summary-count" id="done-count">0</span></span>
+            <span>Total tracked: <span class="summary-count" id="total-count">0</span></span>
+            <button class="clear-roster-btn" id="clear-manual">🗑 Clear Manual Checks</button>
+        </div>
+    </div>
+
+    {{end}}
+
+<script>
+(function() {
+    const VAULT_KEY   = 'wowVaultSlots';
+    const MANUAL_KEY  = 'wowRosterManual';
+
+    // ── Vault slot → label + icon mapping ──
+    const SLOTS = [
+        { key: 'raids-0',    icon: '/images/raid.png',    label: 'Vault: Raid Slot 1',    section: 'Raids' },
+        { key: 'raids-1',    icon: '/images/raid.png',    label: 'Vault: Raid Slot 2',    section: 'Raids' },
+        { key: 'raids-2',    icon: '/images/raid.png',    label: 'Vault: Raid Slot 3',    section: 'Raids' },
+        { key: 'dungeons-0', icon: '/images/dungeon.png', label: 'Vault: Dungeon Slot 1', section: 'Dungeons' },
+        { key: 'dungeons-1', icon: '/images/dungeon.png', label: 'Vault: Dungeon Slot 2', section: 'Dungeons' },
+        { key: 'dungeons-2', icon: '/images/dungeon.png', label: 'Vault: Dungeon Slot 3', section: 'Dungeons' },
+        { key: 'world-0',    icon: '/images/delve.png',   label: 'Vault: World Slot 1',   section: 'World' },
+        { key: 'world-1',    icon: '/images/delve.png',   label: 'Vault: World Slot 2',   section: 'World' },
+        { key: 'world-2',    icon: '/images/delve.png',   label: 'Vault: World Slot 3',   section: 'World' },
+    ];
+
+    // Extra per-character manual tasks (not vault-linked)
+    const MANUAL_TASKS = [
+        { key: 'weekly-quest', icon: '/images/quest.png', label: 'Weekly Quest', section: 'General' },
+        { key: 'world-boss',   icon: '/images/delve.png', label: 'World Boss',   section: 'General' },
+    ];
+
+    // ── Load data ──
+    let vaultState  = {};
+    let manualState = {};
+    try { vaultState  = JSON.parse(localStorage.getItem(VAULT_KEY)  || '{}'); } catch(e) {}
+    try { manualState = JSON.parse(localStorage.getItem(MANUAL_KEY) || '{}'); } catch(e) {}
+
+    // ── Build character list from DOM ──
+    const chars = [];
+    document.querySelectorAll('#char-data-store span').forEach(el => {
+        chars.push({
+            key:     el.dataset.key,
+            name:    el.dataset.name,
+            realm:   el.dataset.realm,
+            cls:     el.dataset.class,
+            thumb:   el.dataset.thumb,
+            faction: el.dataset.faction,
+            level:   el.dataset.level,
+        });
+    });
+
+    // ── Which vault slots is a character in? ──
+    function vaultSlotsForChar(charKey) {
+        const done = new Set();
+        SLOTS.forEach(slot => {
+            const keys = vaultState[slot.key];
+            if (Array.isArray(keys) && keys.includes(charKey)) done.add(slot.key);
+        });
+        return done;
+    }
+
+    // ── Render ──
+    function render() {
+        const container = document.getElementById('roster-rows');
+        container.innerHTML = '';
+        let doneCount = 0;
+
+        chars.forEach(char => {
+            const vaultDone = vaultSlotsForChar(char.key);
+            const manual = manualState[char.key] || {};
+
+            // Gather all tasks and their completion status
+            const allTasks = [
+                ...SLOTS.map(s => ({ ...s, done: vaultDone.has(s.key), isVault: true })),
+                ...MANUAL_TASKS.map(t => ({ ...t, done: !!manual[t.key], isVault: false })),
+            ];
+            const totalTasks = allTasks.length;
+            const completedTasks = allTasks.filter(t => t.done).length;
+            const allComplete = completedTasks === totalTasks;
+            if (allComplete) doneCount++;
+
+            // Build row
+            const row = document.createElement('div');
+            row.className = 'char-row' + (allComplete ? ' all-done' : '');
+            row.dataset.charKey = char.key;
+
+            // ── Identity cell ──
+            const identity = document.createElement('div');
+            identity.className = 'char-identity';
+
+            if (char.thumb) {
+                const img = document.createElement('img');
+                img.className = 'char-portrait';
+                img.src = char.thumb;
+                img.alt = char.name;
+                img.onerror = function() { this.replaceWith(makePlaceholder()); };
+                identity.appendChild(img);
+            } else {
+                identity.appendChild(makePlaceholder());
+            }
+
+            const info = document.createElement('div');
+            info.className = 'char-info';
+
+            const nameEl = document.createElement('div');
+            nameEl.className = 'char-name';
+            nameEl.textContent = char.name;
+            info.appendChild(nameEl);
+
+            const metaEl = document.createElement('div');
+            metaEl.className = 'char-meta';
+            const clsImg = document.createElement('img');
+            clsImg.className = 'class-icon';
+            clsImg.src = '/images/' + char.cls + '.png';
+            clsImg.alt = char.cls;
+            clsImg.onerror = function() { this.style.display='none'; };
+            metaEl.appendChild(clsImg);
+            metaEl.appendChild(document.createTextNode(char.realm + ' · ' + completedTasks + '/' + totalTasks + ' done'));
+            info.appendChild(metaEl);
+
+            identity.appendChild(info);
+            row.appendChild(identity);
+
+            // ── Task list cell ──
+            const taskList = document.createElement('div');
+            taskList.className = 'task-list';
+
+            let lastSection = null;
+            allTasks.forEach(task => {
+                // Section divider
+                if (task.section !== lastSection) {
+                    lastSection = task.section;
+                    const sec = document.createElement('div');
+                    sec.className = 'task-section-label';
+                    sec.textContent = task.section;
+                    taskList.appendChild(sec);
+                }
+
+                const item = document.createElement('div');
+                item.className = 'task-item' + (task.done ? ' done' : '');
+
+                const iconImg = document.createElement('img');
+                iconImg.className = 'task-icon';
+                iconImg.src = task.icon;
+                iconImg.alt = '';
+                iconImg.onerror = function() { this.style.display='none'; };
+                item.appendChild(iconImg);
+
+                const check = document.createElement('div');
+                check.className = 'task-check' + (task.done ? ' checked' : '');
+                check.textContent = task.done ? '✓' : '';
+                item.appendChild(check);
+
+                const labelEl = document.createElement('span');
+                labelEl.className = 'task-label';
+                labelEl.textContent = task.label;
+                item.appendChild(labelEl);
+
+                if (task.isVault) {
+                    const src = document.createElement('span');
+                    src.className = 'task-source';
+                    src.textContent = task.done ? 'Tracked in Vault ✓' : 'Set in Great Vault →';
+                    item.appendChild(src);
+                } else {
+                    // Manual checkbox
+                    const src = document.createElement('span');
+                    src.className = 'task-source';
+                    src.style.cursor = 'pointer';
+                    src.style.userSelect = 'none';
+                    src.textContent = task.done ? 'Done ✓' : 'Mark done';
+                    src.addEventListener('click', () => {
+                        toggleManual(char.key, task.key);
+                    });
+                    item.appendChild(src);
+                    item.style.cursor = 'default';
+                }
+
+                taskList.appendChild(item);
+            });
+
+            row.appendChild(taskList);
+            container.appendChild(row);
+        });
+
+        document.getElementById('done-count').textContent = doneCount;
+        document.getElementById('total-count').textContent = chars.length;
+    }
+
+    function makePlaceholder() {
+        const d = document.createElement('div');
+        d.className = 'char-portrait-placeholder';
+        return d;
+    }
+
+    function toggleManual(charKey, taskKey) {
+        if (!manualState[charKey]) manualState[charKey] = {};
+        manualState[charKey][taskKey] = !manualState[charKey][taskKey];
+        localStorage.setItem(MANUAL_KEY, JSON.stringify(manualState));
+        render();
+    }
+
+    // ── Clear manual checks ──
+    document.getElementById('clear-manual')?.addEventListener('click', () => {
+        manualState = {};
+        localStorage.setItem(MANUAL_KEY, JSON.stringify(manualState));
+        render();
+    });
+
+    // ── Listen for vault changes in other tabs ──
+    window.addEventListener('storage', e => {
+        if (e.key === VAULT_KEY) {
+            try { vaultState = JSON.parse(e.newValue || '{}'); } catch(x) {}
+            render();
+        }
+    });
+
+    render();
+})();
+</script>
+</body>
+</html>
+`
 
 var vaultTemplate = `<!DOCTYPE html>
 <html lang="en">
@@ -1492,12 +2043,34 @@ const htmlTemplate = `
             fill: #d4c5a0;
             filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5));
         }
-        .header-vault-btn {
+        .header-nav-btns {
             position: absolute;
             top: 10px;
             left: 10px;
-            padding: 10px 18px;
-            font-size: 0.95em;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            width: max-content;
+        }
+        .header-vault-btn,
+        .header-roster-btn {
+            padding: 10px 16px;
+            font-size: 0.9em;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            white-space: nowrap;
+            width: 100%;
+            box-sizing: border-box;
+        }
+        .header-roster-btn {
+            background: linear-gradient(135deg, rgba(100,80,20,0.85), rgba(70,55,10,0.85));
+            border-color: #c8a020;
+            color: #ffe680;
+        }
+        .header-roster-btn:hover {
+            border-color: #ffe680;
+            background: linear-gradient(135deg, rgba(130,105,30,0.9), rgba(90,70,15,0.9));
         }
         .logo {
             max-width: 350px;
@@ -1935,10 +2508,16 @@ const htmlTemplate = `
                 <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
             </a>
             {{if .Authenticated}}
-            <a href="/vault" class="btn btn-vault header-vault-btn">
-                <img src="/images/vault-button.png" alt="Vault" style="width:22px;height:22px;vertical-align:middle;margin-right:6px;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
-                Great Vault
-            </a>
+            <div class="header-nav-btns">
+                <a href="/vault" class="btn btn-vault header-vault-btn">
+                    <img src="/images/vault-button.png" alt="Vault" style="width:22px;height:22px;flex-shrink:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
+                    Great Vault
+                </a>
+                <a href="/roster" class="btn btn-vault header-roster-btn">
+                    <img src="/images/quest.png" alt="Roster" style="width:22px;height:22px;flex-shrink:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
+                    Weekly Roster
+                </a>
+            </div>
             {{end}}
             <img src="/images/World-of-Warcraft-Logo-2001.png" alt="World of Warcraft" class="logo">
             {{if .Authenticated}}
