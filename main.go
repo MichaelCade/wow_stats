@@ -59,6 +59,8 @@ type AccountSummary struct {
 	TotalGold       int64
 	MountsCollected int
 	PetsCollected   int
+	HordeCount      int
+	AllianceCount   int
 	LastUpdate      time.Time
 	Authenticated   bool
 }
@@ -116,6 +118,7 @@ func main() {
 	http.HandleFunc("/login", handleLogin)
 	http.HandleFunc("/callback", handleCallback)
 	http.HandleFunc("/refresh", handleRefresh)
+	http.HandleFunc("/vault", handleVault)
 	http.HandleFunc("/api/stats", handleAPIStats)
 	http.HandleFunc("/debug/raids", handleDebugRaids)
 	http.HandleFunc("/debug/profile", handleDebugProfile)
@@ -323,9 +326,15 @@ func fetchCharacterData() {
 		return allCharacters[i].ItemLevel > allCharacters[j].ItemLevel
 	})
 
-	// Calculate total gold
+	// Calculate total gold and faction counts
 	var totalGold int64
+	var hordeCount, allianceCount int
 	for _, char := range allCharacters {
+		if char.Faction == "HORDE" {
+			hordeCount++
+		} else if char.Faction == "ALLIANCE" {
+			allianceCount++
+		}
 		if char.Error == "" {
 			totalGold += char.Gold
 		}
@@ -374,13 +383,15 @@ func fetchCharacterData() {
 		TotalGold:       totalGold,
 		MountsCollected: mountsCollected,
 		PetsCollected:   petsCollected,
+		HordeCount:      hordeCount,
+		AllianceCount:   allianceCount,
 		LastUpdate:      time.Now(),
 		Authenticated:   true,
 	}
 	summaryMutex.Unlock()
 
-	log.Printf("Data updated. Found %d characters. Total gold: %s. Mounts: %d, Pets: %d",
-		len(allCharacters), formatGold(totalGold), mountsCollected, petsCollected)
+	log.Printf("Data updated. Found %d characters (%d Horde, %d Alliance). Total gold: %s. Mounts: %d, Pets: %d",
+		len(allCharacters), hordeCount, allianceCount, formatGold(totalGold), mountsCollected, petsCollected)
 }
 
 func fetchCharacterDetails(client *http.Client, realm, name, protectedHref string) CharacterStats {
@@ -635,10 +646,10 @@ func handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Run synchronously so the redirect only happens once data is fresh
-	fetchCharacterData()
+	// Run in background so the browser isn't left waiting for all API calls to finish
+	go fetchCharacterData()
 
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	http.Redirect(w, r, "/?refreshing=true", http.StatusSeeOther)
 }
 
 func handleAPIStats(w http.ResponseWriter, r *http.Request) {
@@ -737,6 +748,587 @@ func handleDebugProfile(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(resp.StatusCode)
 	w.Write(body)
 }
+
+func handleVault(w http.ResponseWriter, r *http.Request) {
+	summaryMutex.RLock()
+	summary := accountSummary
+	summaryMutex.RUnlock()
+
+	tmpl, err := template.New("vault").Funcs(template.FuncMap{
+		"lower": strings.ToLower,
+	}).Parse(vaultTemplate)
+	if err != nil {
+		http.Error(w, "Template error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := tmpl.Execute(w, summary); err != nil {
+		log.Printf("Vault template error: %v", err)
+	}
+}
+
+var vaultTemplate = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Great Vault Tracker</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background: #0a0e17;
+            color: #f8e6c8;
+            font-family: 'Palatino Linotype', 'Book Antiqua', Palatino, serif;
+            min-height: 100vh;
+            padding: 20px;
+            background-image: radial-gradient(ellipse at top, #1a1f2e 0%, #0a0e17 70%);
+        }
+        .page-header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .page-header img.vault-logo {
+            width: 80px;
+            height: 80px;
+            filter: drop-shadow(0 0 16px rgba(160, 96, 224, 0.7));
+            margin-bottom: 10px;
+        }
+        .page-header h1 {
+            font-size: 2.2em;
+            color: #e8d0ff;
+            text-shadow: 0 0 20px rgba(160, 96, 224, 0.6), 2px 2px 6px rgba(0,0,0,0.8);
+            letter-spacing: 2px;
+        }
+        .page-header p {
+            color: #9b8a6e;
+            font-size: 0.95em;
+            margin-top: 6px;
+        }
+        .back-btn {
+            display: inline-block;
+            margin-bottom: 20px;
+            background: linear-gradient(135deg, rgba(61,48,32,0.8), rgba(40,32,20,0.8));
+            border: 2px solid #7d6a4d;
+            color: #f8e6c8;
+            padding: 10px 24px;
+            border-radius: 6px;
+            text-decoration: none;
+            font-family: inherit;
+            font-size: 0.95em;
+            letter-spacing: 1px;
+            transition: all 0.2s;
+        }
+        .back-btn:hover { border-color: #9d8a6d; transform: translateY(-1px); }
+
+        .vault-layout {
+            display: flex;
+            gap: 24px;
+            align-items: flex-start;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        /* ── CHARACTER ROSTER ── */
+        .roster-panel {
+            width: 200px;
+            flex-shrink: 0;
+            background: linear-gradient(135deg, rgba(26,31,46,0.9), rgba(15,20,25,0.9));
+            border: 2px solid #3d3020;
+            border-radius: 10px;
+            padding: 16px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+        }
+        .roster-panel h3 {
+            font-size: 0.85em;
+            color: #9b8a6e;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            margin-bottom: 14px;
+            text-align: center;
+            border-bottom: 1px solid #3d3020;
+            padding-bottom: 10px;
+        }
+        .roster-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .char-chip {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: rgba(61,48,32,0.5);
+            border: 1px solid #5a4a30;
+            border-radius: 6px;
+            padding: 6px 8px;
+            cursor: grab;
+            transition: all 0.2s;
+            user-select: none;
+        }
+        .char-chip:hover {
+            border-color: #a060e0;
+            background: rgba(80,40,120,0.4);
+            transform: translateX(2px);
+        }
+        .char-chip.dragging {
+            opacity: 0.4;
+            cursor: grabbing;
+        }
+        .char-chip img.chip-thumb {
+            width: 32px;
+            height: 32px;
+            border-radius: 4px;
+            border: 1px solid #5a4a30;
+            object-fit: cover;
+            flex-shrink: 0;
+        }
+        .char-chip img.chip-class {
+            width: 18px;
+            height: 18px;
+            flex-shrink: 0;
+        }
+        .chip-name {
+            font-size: 0.82em;
+            color: #f8e6c8;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            flex: 1;
+        }
+        .chip-level {
+            font-size: 0.72em;
+            color: #9b8a6e;
+            flex-shrink: 0;
+        }
+
+        /* ── VAULT GRID ── */
+        .vault-panel {
+            flex: 1;
+            background: linear-gradient(135deg, rgba(26,31,46,0.9), rgba(15,20,25,0.9));
+            border: 2px solid #3d3020;
+            border-radius: 10px;
+            padding: 24px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+        }
+        .vault-section {
+            margin-bottom: 28px;
+        }
+        .vault-section:last-child { margin-bottom: 0; }
+        .section-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 14px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #3d3020;
+        }
+        .section-icon { font-size: 1.4em; }
+        .section-icon-img {
+            width: 28px;
+            height: 28px;
+            object-fit: contain;
+            filter: drop-shadow(0 2px 4px rgba(0,0,0,0.6));
+        }
+        .section-title {
+            font-size: 1.1em;
+            color: #f8e6c8;
+            letter-spacing: 1px;
+        }
+        .slots-row {
+            display: flex;
+            gap: 14px;
+            flex-wrap: wrap;
+        }
+        .vault-slot {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+            flex: 1;
+            min-width: 160px;
+        }
+        .slot-label {
+            font-size: 0.72em;
+            color: #9b8a6e;
+            text-align: center;
+            line-height: 1.3;
+            min-height: 2.4em;
+        }
+        .slot-label span {
+            color: #c8a860;
+        }
+        .drop-zone {
+            width: 100%;
+            min-height: 110px;
+            border: 2px dashed #5a4a30;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: flex-start;
+            flex-wrap: wrap;
+            gap: 6px;
+            padding: 8px;
+            transition: all 0.2s;
+            position: relative;
+            background: rgba(20,15,10,0.5);
+            box-sizing: border-box;
+        }
+        .drop-zone.drag-over {
+            border-color: #a060e0;
+            background: rgba(80,40,120,0.3);
+            box-shadow: 0 0 12px rgba(160,96,224,0.4);
+        }
+        .drop-zone.filled {
+            border-style: solid;
+            border-color: #7d6a4d;
+        }
+        .drop-zone .empty-hint {
+            font-size: 0.7em;
+            color: #5a4a30;
+            text-align: center;
+            pointer-events: none;
+            width: 100%;
+        }
+        /* mini card inside a slot */
+        .slot-card {
+            width: 80px;
+            border-radius: 6px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 3px;
+            position: relative;
+            padding: 5px 4px 4px;
+            background: rgba(30,25,15,0.7);
+            border: 1px solid #5a4a30;
+            flex-shrink: 0;
+        }
+        .slot-card img.sc-thumb {
+            width: 44px;
+            height: 44px;
+            border-radius: 4px;
+            border: 1px solid #7d6a4d;
+            object-fit: cover;
+        }
+        .slot-card img.sc-class {
+            position: absolute;
+            bottom: 4px;
+            right: 4px;
+            width: 16px;
+            height: 16px;
+        }
+        .slot-card .sc-name {
+            font-size: 0.68em;
+            color: #f8e6c8;
+            text-align: center;
+            width: 72px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .slot-card .sc-remove {
+            position: absolute;
+            top: 2px;
+            right: 2px;
+            background: rgba(180,40,40,0.8);
+            border: none;
+            color: #fff;
+            font-size: 0.6em;
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            line-height: 1;
+            padding: 0;
+        }
+        .slot-card .sc-remove:hover { background: rgba(220,60,60,0.95); }
+
+        .clear-btn {
+            margin-top: 20px;
+            background: linear-gradient(135deg, rgba(120,30,30,0.7), rgba(80,20,20,0.7));
+            border: 1px solid #a04040;
+            color: #ffaaaa;
+            padding: 8px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 0.85em;
+            letter-spacing: 1px;
+            transition: all 0.2s;
+        }
+        .clear-btn:hover { border-color: #e06060; background: rgba(160,40,40,0.8); }
+
+        .no-chars {
+            text-align: center;
+            padding: 40px;
+            color: #9b8a6e;
+        }
+    </style>
+</head>
+<body>
+    <a href="/" class="back-btn">← Back to Characters</a>
+
+    <div class="page-header">
+        <img src="/images/vault-button.png" alt="Great Vault" class="vault-logo">
+        <h1>Great Vault Tracker</h1>
+        <p>Drag characters onto slots to track your weekly Great Vault progress</p>
+    </div>
+
+    {{if not .Authenticated}}
+    <div class="no-chars">
+        <p>Please <a href="/login" style="color:#a060e0;">log in</a> to use the vault tracker.</p>
+    </div>
+    {{else if eq (len .Characters) 0}}
+    <div class="no-chars">
+        <p>No character data yet — go back and wait for data to load.</p>
+    </div>
+    {{else}}
+    <div class="vault-layout">
+
+        <!-- CHARACTER ROSTER -->
+        <div class="roster-panel">
+            <h3>Your Characters</h3>
+            <div class="roster-list" id="roster">
+                {{range .Characters}}
+                {{if ge .Level 90}}
+                <div class="char-chip"
+                     draggable="true"
+                     data-name="{{.Name}}"
+                     data-realm="{{.Realm}}"
+                     data-class="{{lower .Class}}"
+                     data-level="{{.Level}}"
+                     data-thumb="{{.ThumbnailURL}}"
+                     data-faction="{{.Faction}}">
+                    {{if .ThumbnailURL}}
+                    <img class="chip-thumb" src="{{.ThumbnailURL}}" alt="{{.Name}}" onerror="this.style.display='none'">
+                    {{end}}
+                    <img class="chip-class" src="/images/{{lower .Class}}.png" alt="{{.Class}}" onerror="this.style.display='none'">
+                    <span class="chip-name">{{.Name}}</span>
+                    <span class="chip-level">{{.Level}}</span>
+                </div>
+                {{end}}
+                {{end}}
+            </div>
+        </div>
+
+        <!-- VAULT GRID -->
+        <div class="vault-panel">
+            <!-- RAIDS -->
+            <div class="vault-section">
+                <div class="section-header">
+                    <img src="/images/raid.png" alt="Raids" class="section-icon-img">
+                    <span class="section-title">Raids</span>
+                </div>
+                <div class="slots-row">
+                    <div class="vault-slot">
+                        <div class="slot-label">Slot 1<br><span>Defeat 2 Midnight Season 1 Boss</span></div>
+                        <div class="drop-zone" data-slot="raids-0"><span class="empty-hint">Drop character</span></div>
+                    </div>
+                    <div class="vault-slot">
+                        <div class="slot-label">Slot 2<br><span>Defeat 4 Midnight Season 1 Boss</span></div>
+                        <div class="drop-zone" data-slot="raids-1"><span class="empty-hint">Drop character</span></div>
+                    </div>
+                    <div class="vault-slot">
+                        <div class="slot-label">Slot 3<br><span>Defeat 6 Midnight Season 1 Boss</span></div>
+                        <div class="drop-zone" data-slot="raids-2"><span class="empty-hint">Drop character</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- DUNGEONS -->
+            <div class="vault-section">
+                <div class="section-header">
+                    <img src="/images/dungeon.png" alt="Dungeons" class="section-icon-img">
+                    <span class="section-title">Dungeons</span>
+                </div>
+                <div class="slots-row">
+                    <div class="vault-slot">
+                        <div class="slot-label">Slot 1<br><span>Complete 1 Heroic, Mythic, or Timewalking Dungeon</span></div>
+                        <div class="drop-zone" data-slot="dungeons-0"><span class="empty-hint">Drop character</span></div>
+                    </div>
+                    <div class="vault-slot">
+                        <div class="slot-label">Slot 2<br><span>Complete 4 Heroic, Mythic, or Timewalking Dungeon</span></div>
+                        <div class="drop-zone" data-slot="dungeons-1"><span class="empty-hint">Drop character</span></div>
+                    </div>
+                    <div class="vault-slot">
+                        <div class="slot-label">Slot 3<br><span>Complete 8 Heroic, Mythic, or Timewalking Dungeon</span></div>
+                        <div class="drop-zone" data-slot="dungeons-2"><span class="empty-hint">Drop character</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- WORLD -->
+            <div class="vault-section">
+                <div class="section-header">
+                    <img src="/images/delve.png" alt="World" class="section-icon-img">
+                    <span class="section-title">World (Delves / World Activities)</span>
+                </div>
+                <div class="slots-row">
+                    <div class="vault-slot">
+                        <div class="slot-label">Slot 1<br><span>Complete 2 Delves or World Activities</span></div>
+                        <div class="drop-zone" data-slot="world-0"><span class="empty-hint">Drop character</span></div>
+                    </div>
+                    <div class="vault-slot">
+                        <div class="slot-label">Slot 2<br><span>Complete 4 Delves or World Activities</span></div>
+                        <div class="drop-zone" data-slot="world-1"><span class="empty-hint">Drop character</span></div>
+                    </div>
+                    <div class="vault-slot">
+                        <div class="slot-label">Slot 3<br><span>Complete 8 Delves or World Activities</span></div>
+                        <div class="drop-zone" data-slot="world-2"><span class="empty-hint">Drop character</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <button class="clear-btn" id="clear-all">🗑 Clear All Slots</button>
+        </div>
+    </div>
+    {{end}}
+
+<script>
+(function() {
+    const STORAGE_KEY = 'wowVaultSlots';
+
+    // Build character data map from DOM
+    const charData = {};
+    document.querySelectorAll('.char-chip').forEach(chip => {
+        const key = chip.dataset.name + '-' + chip.dataset.realm;
+        charData[key] = {
+            name:    chip.dataset.name,
+            realm:   chip.dataset.realm,
+            cls:     chip.dataset.class,
+            level:   chip.dataset.level,
+            thumb:   chip.dataset.thumb,
+            faction: chip.dataset.faction,
+        };
+    });
+
+    let dragKey = null;
+
+    // ── DRAG FROM ROSTER ──
+    document.querySelectorAll('.char-chip').forEach(chip => {
+        chip.addEventListener('dragstart', e => {
+            dragKey = chip.dataset.name + '-' + chip.dataset.realm;
+            chip.classList.add('dragging');
+            e.dataTransfer.effectAllowed = 'copy';
+        });
+        chip.addEventListener('dragend', () => chip.classList.remove('dragging'));
+    });
+
+    // ── DROP ZONES ──
+    document.querySelectorAll('.drop-zone').forEach(zone => {
+        zone.addEventListener('dragover', e => {
+            e.preventDefault();
+            zone.classList.add('drag-over');
+        });
+        zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
+        zone.addEventListener('drop', e => {
+            e.preventDefault();
+            zone.classList.remove('drag-over');
+            if (dragKey) {
+                addToSlot(zone, dragKey);
+                saveState();
+            }
+        });
+    });
+
+    function addToSlot(zone, key) {
+        const c = charData[key];
+        if (!c) return;
+
+        // Remove empty hint if present
+        const hint = zone.querySelector('.empty-hint');
+        if (hint) hint.remove();
+
+        zone.classList.add('filled');
+
+        const card = document.createElement('div');
+        card.className = 'slot-card';
+        card.dataset.charKey = key;
+
+        if (c.thumb) {
+            const thumb = document.createElement('img');
+            thumb.className = 'sc-thumb';
+            thumb.src = c.thumb;
+            thumb.alt = c.name;
+            thumb.onerror = function() { this.style.display='none'; };
+            card.appendChild(thumb);
+        }
+
+        const name = document.createElement('div');
+        name.className = 'sc-name';
+        name.textContent = c.name;
+        card.appendChild(name);
+
+        const cls = document.createElement('img');
+        cls.className = 'sc-class';
+        cls.src = '/images/' + c.cls + '.png';
+        cls.alt = c.cls;
+        cls.onerror = function() { this.style.display='none'; };
+        card.appendChild(cls);
+
+        const rm = document.createElement('button');
+        rm.className = 'sc-remove';
+        rm.title = 'Remove';
+        rm.textContent = '✕';
+        rm.addEventListener('click', () => {
+            card.remove();
+            if (!zone.querySelector('.slot-card')) {
+                clearSlot(zone);
+            }
+            saveState();
+        });
+        card.appendChild(rm);
+
+        zone.appendChild(card);
+    }
+
+    function clearSlot(zone) {
+        zone.classList.remove('filled');
+        zone.innerHTML = '<span class="empty-hint">Drop character</span>';
+    }
+
+    // ── CLEAR ALL ──
+    document.getElementById('clear-all')?.addEventListener('click', () => {
+        document.querySelectorAll('.drop-zone').forEach(zone => clearSlot(zone));
+        saveState();
+    });
+
+    // ── PERSIST TO localStorage (array per slot) ──
+    function saveState() {
+        const state = {};
+        document.querySelectorAll('.drop-zone').forEach(zone => {
+            const keys = Array.from(zone.querySelectorAll('.slot-card')).map(c => c.dataset.charKey);
+            state[zone.dataset.slot] = keys;
+        });
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    }
+
+    function loadState() {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) return;
+        let state;
+        try { state = JSON.parse(raw); } catch(e) { return; }
+        document.querySelectorAll('.drop-zone').forEach(zone => {
+            const keys = state[zone.dataset.slot];
+            if (Array.isArray(keys)) {
+                keys.forEach(key => { if (key && charData[key]) addToSlot(zone, key); });
+            } else if (keys && charData[keys]) {
+                // backwards-compat: old single-string format
+                addToSlot(zone, keys);
+            }
+        });
+    }
+
+    loadState();
+})();
+</script>
+</body>
+</html>
+`
 
 func formatGold(copper int64) string {
 	gold := copper / 10000
@@ -896,6 +1488,13 @@ const htmlTemplate = `
             fill: #d4c5a0;
             filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5));
         }
+        .header-vault-btn {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            padding: 10px 18px;
+            font-size: 0.95em;
+        }
         .logo {
             max-width: 350px;
             height: auto;
@@ -956,6 +1555,37 @@ const htmlTemplate = `
         .summary-stat-value.gold { color: #ffd700; text-shadow: 0 0 10px rgba(255, 215, 0, 0.5), 2px 2px 4px rgba(0,0,0,0.8); }
         .summary-stat-value.mounts { color: #a78bfa; }
         .summary-stat-value.pets { color: #6ee7b7; }
+        .summary-stat-value.horde { color: #c41e3a; text-shadow: 0 0 10px rgba(196, 30, 58, 0.4), 2px 2px 4px rgba(0,0,0,0.8); }
+        .summary-stat-value.alliance { color: #1a6bbf; text-shadow: 0 0 10px rgba(26, 107, 191, 0.4), 2px 2px 4px rgba(0,0,0,0.8); }
+        .faction-counts {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            text-align: left;
+        }
+        .faction-count-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .faction-count-row img {
+            width: 22px;
+            height: 22px;
+            filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5));
+        }
+        .faction-count-label {
+            font-size: 0.8em;
+            color: #9b8a6e;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            min-width: 60px;
+        }
+        .faction-count-value {
+            font-size: 1.5em;
+            font-weight: bold;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.8);
+            letter-spacing: 1px;
+        }
         .summary-divider {
             width: 1px;
             background: #3d3020;
@@ -1220,6 +1850,16 @@ const htmlTemplate = `
             background: linear-gradient(135deg, rgba(0, 106, 204, 0.9) 0%, rgba(0, 76, 153, 0.9) 100%);
             border-color: #0090ff;
         }
+        .btn-vault {
+            background: linear-gradient(135deg, rgba(80, 40, 120, 0.85) 0%, rgba(50, 20, 80, 0.85) 100%);
+            border-color: #a060e0;
+            color: #e8d0ff;
+            vertical-align: middle;
+        }
+        .btn-vault:hover {
+            background: linear-gradient(135deg, rgba(100, 60, 150, 0.95) 0%, rgba(70, 40, 110, 0.95) 100%);
+            border-color: #c090ff;
+        }
         .loading-message {
             text-align: center;
             padding: 50px 20px;
@@ -1246,21 +1886,38 @@ const htmlTemplate = `
             const authenticated = {{.Authenticated}};
             const hasCharacters = {{if .Characters}}{{len .Characters}}{{else}}0{{end}};
             
-            // Check if we have the loading parameter (just came from OAuth)
             const urlParams = new URLSearchParams(window.location.search);
             const isLoading = urlParams.get('loading') === 'true';
-            
-            if (authenticated && hasCharacters === 0) {
-                // Show message and refresh
+            const isRefreshing = urlParams.get('refreshing') === 'true';
+
+            if (isRefreshing) {
+                // Show a banner and poll until LastUpdate changes
+                const banner = document.createElement('div');
+                banner.id = 'refresh-banner';
+                banner.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#1a3a1a;color:#6ee7b7;text-align:center;padding:10px;font-size:0.95em;z-index:9999;border-bottom:1px solid #2d5a2d;';
+                banner.textContent = '⏳ Fetching latest data from Battle.net… page will update automatically.';
+                document.body.prepend(banner);
+
+                const lastUpdate = '{{.LastUpdate}}';
+                const poll = setInterval(function() {
+                    fetch('/api/stats')
+                        .then(r => r.json())
+                        .then(data => {
+                            if (data.LastUpdate && data.LastUpdate !== lastUpdate) {
+                                clearInterval(poll);
+                                window.location.href = '/';
+                            }
+                        })
+                        .catch(() => {});
+                }, 3000);
+            } else if (authenticated && hasCharacters === 0) {
+                // Just came from OAuth, waiting for first load
                 console.log('Waiting for character data to load...');
                 setTimeout(function() {
-                    console.log('Refreshing to load character data');
-                    // Remove the loading parameter on refresh
                     const newUrl = window.location.pathname;
                     window.location.href = newUrl;
                 }, 2000);
             } else if (isLoading && hasCharacters > 0) {
-                // Data loaded! Remove loading parameter
                 const newUrl = window.location.pathname;
                 window.history.replaceState({}, document.title, newUrl);
             }
@@ -1273,6 +1930,12 @@ const htmlTemplate = `
             <a href="https://github.com/MichaelCade/wow_stats" target="_blank" rel="noopener" class="github-link" title="View on GitHub">
                 <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
             </a>
+            {{if .Authenticated}}
+            <a href="/vault" class="btn btn-vault header-vault-btn">
+                <img src="/images/vault-button.png" alt="Vault" style="width:22px;height:22px;vertical-align:middle;margin-right:6px;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
+                Great Vault
+            </a>
+            {{end}}
             <img src="/images/World-of-Warcraft-Logo-2001.png" alt="World of Warcraft" class="logo">
             {{if .Authenticated}}
             <div class="last-update">Last Updated: {{.LastUpdate.Format "Jan 02, 2006 15:04:05 MST"}}</div>
@@ -1320,6 +1983,28 @@ const htmlTemplate = `
                     <div class="summary-stat-value pets">{{.PetsCollected}}</div>
                 </div>
                 {{end}}
+                {{if or .HordeCount .AllianceCount}}
+                <div class="summary-divider"></div>
+                <div class="summary-stat">
+                    <div class="summary-stat-label" style="margin-bottom: 10px;">Characters by Faction</div>
+                    <div class="faction-counts">
+                        {{if .AllianceCount}}
+                        <div class="faction-count-row">
+                            <img src="/images/wow-alliance.png" alt="Alliance">
+                            <span class="faction-count-label">Alliance</span>
+                            <span class="faction-count-value alliance">{{.AllianceCount}}</span>
+                        </div>
+                        {{end}}
+                        {{if .HordeCount}}
+                        <div class="faction-count-row">
+                            <img src="/images/wow-horde.png" alt="Horde">
+                            <span class="faction-count-label">Horde</span>
+                            <span class="faction-count-value horde">{{.HordeCount}}</span>
+                        </div>
+                        {{end}}
+                    </div>
+                </div>
+                {{end}}
             </div>
         </div>
 
@@ -1333,9 +2018,32 @@ const htmlTemplate = `
                         <div class="character-realm">{{.Realm}}</div>
                     </div>
                 </div>
+                {{if eq .Faction "ALLIANCE"}}
+                <div class="faction-badge faction-alliance">
+                    <img src="/images/wow-alliance.png" alt="Alliance" class="faction-logo">
+                    Alliance
+                </div>
+                {{else if eq .Faction "HORDE"}}
+                <div class="faction-badge faction-horde">
+                    <img src="/images/wow-horde.png" alt="Horde" class="faction-logo">
+                    Horde
+                </div>
+                {{end}}
+                {{if .Class}}
+                <div class="race-class-info">
+                    {{if getClassIcon .Class}}
+                    <img src="{{getClassIcon .Class}}" alt="{{.Class}}" class="class-icon">
+                    {{end}}
+                    <span>{{.Race}} {{.Class}}</span>
+                </div>
+                {{end}}
+                <div class="stat-row">
+                    <span class="stat-label">Level:</span>
+                    <span class="stat-value">{{.Level}}</span>
+                </div>
                 <div class="stub-notice">
                     <span class="stub-icon">🌱</span>
-                    <span class="stub-text">Below level 10 — no profile data available</span>
+                    <span class="stub-text">Below level 10 — limited profile data</span>
                 </div>
             </div>
             {{else}}
@@ -1427,7 +2135,7 @@ const htmlTemplate = `
 
         <div class="controls">
             <form action="/refresh" method="POST" style="display: inline;">
-                <button type="submit" class="btn" id="refresh-btn" onclick="this.disabled=true; this.textContent='⏳ Refreshing…'">🔄 Refresh Data</button>
+                <button type="submit" class="btn" id="refresh-btn">🔄 Refresh Data</button>
             </form>
             <div class="refresh-note">
                 💡 Data only updates after you <strong>log out</strong> of a character in-game — Blizzard's API reflects the last logout state.
