@@ -127,6 +127,9 @@ func main() {
 		},
 	}
 
+	// Optional persistence — safe to skip if DATABASE_URL is not set
+	initDB()
+
 	// Setup HTTP routes
 	http.HandleFunc("/", handleHome)
 	http.HandleFunc("/login", handleLogin)
@@ -136,6 +139,7 @@ func main() {
 	http.HandleFunc("/vault", handleVault)
 	http.HandleFunc("/roster", handleRoster)
 	http.HandleFunc("/professions", handleProfessions)
+	http.HandleFunc("/history", handleHistory)
 	http.HandleFunc("/api/stats", handleAPIStats)
 	http.HandleFunc("/debug/raids", handleDebugRaids)
 	http.HandleFunc("/debug/profile", handleDebugProfile)
@@ -420,7 +424,11 @@ func fetchCharacterData() {
 		LastUpdate:      time.Now(),
 		Authenticated:   true,
 	}
+	snapshot := accountSummary // copy before unlock
 	summaryMutex.Unlock()
+
+	// Persist snapshot asynchronously — never blocks the UI
+	go saveSnapshot(snapshot)
 
 	log.Printf("Data updated. Found %d characters (%d Horde, %d Alliance). Total gold: %s. Mounts: %d, Pets: %d",
 		len(allCharacters), hordeCount, allianceCount, formatGold(totalGold), mountsCollected, petsCollected)
@@ -869,6 +877,422 @@ func handleProfessions(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// ── History handler ──────────────────────────────────────────────────────────
+
+type HistoryPageData struct {
+	DBEnabled      bool
+	AccountHistory AccountHistory
+	CharHistories  []CharacterHistory
+}
+
+func handleHistory(w http.ResponseWriter, r *http.Request) {
+	data := HistoryPageData{DBEnabled: db != nil}
+
+	if db != nil {
+		var err error
+		data.AccountHistory, err = getAccountHistory()
+		if err != nil {
+			log.Printf("History: account query failed: %v", err)
+		}
+		data.CharHistories, err = getCharacterHistories()
+		if err != nil {
+			log.Printf("History: character query failed: %v", err)
+		}
+	}
+
+	tmpl, err := template.New("history").Funcs(template.FuncMap{
+		"json": func(v interface{}) (template.JS, error) {
+			b, err := json.Marshal(v)
+			return template.JS(b), err
+		},
+	}).Parse(historyTemplate)
+	if err != nil {
+		http.Error(w, "Template error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := tmpl.Execute(w, data); err != nil {
+		log.Printf("History template error: %v", err)
+	}
+}
+
+var historyTemplate = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Progression History</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background: linear-gradient(to bottom, #0a0e1a 0%, #1a1f2e 50%, #0f1419 100%);
+            color: #f8e6c8;
+            font-family: 'Palatino Linotype', 'Book Antiqua', Palatino, serif;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        /* ── SHARED HEADER ── */
+        .container { max-width: 1400px; margin: 0 auto; padding: 0 20px; }
+        header {
+            text-align: center;
+            margin-bottom: 20px;
+            padding: 5px 20px;
+            position: relative;
+        }
+        .github-link {
+            position: absolute; top: 10px; right: 10px;
+            opacity: 0.6; transition: opacity 0.2s ease, transform 0.2s ease;
+        }
+        .github-link:hover { opacity: 1; transform: scale(1.1); }
+        .github-link svg { width: 28px; height: 28px; fill: #d4c5a0; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5)); }
+        .header-nav-btns {
+            position: absolute; top: 10px; left: 10px;
+            display: flex; flex-direction: column; gap: 8px; width: max-content;
+        }
+        .nav-btn {
+            display: inline-flex; align-items: center;
+            padding: 10px 16px; font-size: 0.9em; gap: 8px;
+            white-space: nowrap; width: 100%; box-sizing: border-box;
+            border-radius: 4px; border: 2px solid #7d6a4d;
+            background: linear-gradient(135deg, rgba(61,48,32,0.8), rgba(40,32,20,0.8));
+            color: #f8e6c8; text-decoration: none; font-family: inherit;
+            cursor: pointer; letter-spacing: 1px; text-shadow: 1px 1px 2px rgba(0,0,0,0.8);
+            transition: border-color 0.2s, background 0.2s;
+        }
+        .nav-btn:hover { border-color: #9d8a6d; background: linear-gradient(135deg, rgba(81,68,52,0.9), rgba(60,52,40,0.9)); }
+        .nav-btn-vault  { background: linear-gradient(135deg, rgba(80,40,120,0.85), rgba(50,20,80,0.85));  border-color: #a060e0; color: #e8d0ff; }
+        .nav-btn-vault:hover  { border-color: #c090ff; background: linear-gradient(135deg, rgba(100,60,150,0.95), rgba(70,40,110,0.95)); }
+        .nav-btn-roster { background: linear-gradient(135deg, rgba(100,80,20,0.85), rgba(70,55,10,0.85)); border-color: #c8a020; color: #ffe680; }
+        .nav-btn-roster:hover { border-color: #ffe680; background: linear-gradient(135deg, rgba(130,105,30,0.9), rgba(90,70,15,0.9)); }
+        .nav-btn-prof   { background: linear-gradient(135deg, rgba(20,70,50,0.85), rgba(10,50,35,0.85));   border-color: #20c87a; color: #80ffcc; }
+        .nav-btn-prof:hover   { border-color: #80ffcc; background: linear-gradient(135deg, rgba(30,100,65,0.9), rgba(15,70,45,0.9)); }
+        .nav-btn-history { background: linear-gradient(135deg, rgba(20,50,90,0.85), rgba(10,35,70,0.85)); border-color: #4080c0; color: #a0d0ff; }
+        .nav-btn-history:hover { border-color: #80c0ff; background: linear-gradient(135deg, rgba(30,70,120,0.9), rgba(15,50,100,0.9)); }
+        .nav-btn-logout { background: linear-gradient(135deg, rgba(80,20,20,0.8), rgba(50,10,10,0.8));     border-color: #a04040; color: #ffaaaa; }
+        .nav-btn-logout:hover { border-color: #e06060; background: linear-gradient(135deg, rgba(120,30,30,0.9), rgba(80,15,15,0.9)); }
+        .logo { max-width: 350px; height: auto; filter: drop-shadow(0 4px 8px rgba(0,0,0,0.5)); margin-bottom: 5px; }
+
+        /* ── PAGE CONTENT ── */
+        .page-header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .page-header h1 {
+            font-size: 2.2em;
+            color: #a0d0ff;
+            text-shadow: 0 0 20px rgba(64,128,192,0.5), 2px 2px 6px rgba(0,0,0,0.8);
+            letter-spacing: 2px;
+        }
+        .page-header p {
+            color: #9b8a6e;
+            font-size: 0.95em;
+            margin-top: 6px;
+        }
+        .page-wrap {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 20px 60px;
+        }
+
+        .notice-box {
+            background: linear-gradient(135deg, rgba(26,31,46,0.9), rgba(15,20,25,0.9));
+            border: 2px solid #3d3020;
+            border-radius: 10px;
+            padding: 28px 32px;
+            text-align: center;
+            max-width: 620px;
+            margin: 40px auto;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+        }
+        .notice-box h2 { color: #f8e6c8; margin-bottom: 12px; font-size: 1.2em; letter-spacing: 1px; }
+        .notice-box p  { color: #9b8a6e; line-height: 1.7; font-size: 0.92em; }
+        .notice-box code {
+            background: rgba(0,0,0,0.4); border-radius: 4px;
+            padding: 2px 7px; color: #80ffcc; font-size: 0.9em;
+            font-family: 'Courier New', monospace;
+        }
+        .notice-box.info  { border-color: #4080c0; }
+        .notice-box.info h2 { color: #a0d0ff; }
+
+        .section-title {
+            font-size: 1.1em; color: #c8a050;
+            border-bottom: 1px solid #3d3020;
+            padding-bottom: 8px; margin: 36px 0 18px;
+            letter-spacing: 1.5px; text-transform: uppercase;
+        }
+        .chart-card {
+            background: linear-gradient(135deg, rgba(26,31,46,0.9), rgba(15,20,25,0.9));
+            border: 2px solid #3d3020;
+            border-radius: 10px; padding: 20px 24px; margin-bottom: 24px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+        }
+        .chart-card h3 {
+            font-size: 0.95em; color: #c8a050;
+            margin-bottom: 16px; letter-spacing: 1px;
+        }
+        .chart-wrap { position: relative; height: 240px; }
+
+        /* Per-character cards — single column, three charts side by side */
+        .char-card {
+            background: linear-gradient(135deg, rgba(26,31,46,0.9), rgba(15,20,25,0.9));
+            border: 2px solid #3d3020;
+            border-radius: 10px; padding: 20px 24px; margin-bottom: 24px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+        }
+        .char-card-header {
+            font-size: 1.05em; color: #f8e6c8;
+            margin-bottom: 18px; letter-spacing: 1px;
+            text-transform: capitalize;
+            border-bottom: 1px solid #3d3020;
+            padding-bottom: 10px;
+            display: flex; align-items: baseline; gap: 10px;
+        }
+        .char-card-header span { color: #9b8a6e; font-size: 0.85em; font-weight: 400; }
+        .char-charts {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 16px;
+        }
+        .char-chart-col {}
+        .char-chart-wrap { position: relative; height: 180px; }
+        .char-chart-label {
+            font-size: 0.8em; color: #9b8a6e; margin-bottom: 6px;
+            text-align: center; letter-spacing: 0.5px; text-transform: uppercase;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+<header>
+    <a href="https://github.com/MichaelCade/wow_stats" target="_blank" rel="noopener" class="github-link" title="View on GitHub">
+        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
+    </a>
+    <div class="header-nav-btns">
+        <a href="/" class="nav-btn">🏠 Home</a>
+        <a href="/vault" class="nav-btn nav-btn-vault">
+            <img src="/images/vault-button.png" style="width:20px;height:20px;flex-shrink:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
+            Great Vault
+        </a>
+        <a href="/roster" class="nav-btn nav-btn-roster">
+            <img src="/images/quest.png" style="width:20px;height:20px;flex-shrink:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
+            Weekly Roster
+        </a>
+        <a href="/professions" class="nav-btn nav-btn-prof">
+            <img src="/images/professions.png" style="width:20px;height:20px;flex-shrink:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
+            Professions
+        </a>
+        <a href="/history" class="nav-btn nav-btn-history">
+            <img src="/images/progress.png" style="width:20px;height:20px;flex-shrink:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
+            History
+        </a>
+        <a href="/logout" class="nav-btn nav-btn-logout">
+            🔓 Re-authenticate
+        </a>
+    </div>
+    <img src="/images/World-of-Warcraft-Logo-2001.png" alt="World of Warcraft" class="logo">
+</header>
+</div>
+
+<div class="page-wrap">
+    <div class="page-header">
+        <h1><img src="/images/progress.png" style="width:32px;height:32px;vertical-align:middle;margin-right:10px;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.6));"> Progression History</h1>
+        <p>Gold &amp; item level trends over time</p>
+    </div>
+
+    {{if not .DBEnabled}}
+    <div class="notice-box">
+        <h2>Database Not Configured</h2>
+        <p>
+            History tracking is optional. To enable it, add the following to your <code>.env</code> file
+            and restart the app:
+        </p>
+        <p style="margin-top:14px;">
+            <code>DATABASE_URL=postgres://user:password@host:5432/wow_stats</code>
+        </p>
+        <p style="margin-top:12px;">
+            The database schema will be created automatically on first startup.
+            Snapshots are saved every time you hit <strong>Refresh</strong> on the home page.
+        </p>
+    </div>
+    {{else}}
+
+    {{if eq (len .AccountHistory.Labels) 0}}
+    <div class="notice-box info">
+        <h2>No History Yet</h2>
+        <p>
+            Database is connected! Snapshots are saved each time you refresh your character data
+            on the home page. Come back after a couple of refreshes to see your trends here.
+        </p>
+    </div>
+    {{else}}
+
+    <div class="section-title">Account-wide</div>
+
+    <div class="chart-card">
+        <h3>💰 Total Gold across all characters</h3>
+        <div class="chart-wrap"><canvas id="chartGold"></canvas></div>
+    </div>
+
+    <div class="chart-card">
+        <h3>🐾 Collection Growth — Mounts &amp; Pets</h3>
+        <div class="chart-wrap"><canvas id="chartCollections"></canvas></div>
+    </div>
+
+    {{if gt (len .CharHistories) 0}}
+    <div class="section-title">Per-Character Progression</div>
+        {{range $i, $c := .CharHistories}}
+        <div class="char-card">
+            <div class="char-card-header">
+                {{$c.Name}} <span>— {{$c.Realm}}</span>
+            </div>
+            <div class="char-charts">
+                <div class="char-chart-col">
+                    <div class="char-chart-label">⚔️ Item Level</div>
+                    <div class="char-chart-wrap"><canvas id="charIlvl{{$i}}"></canvas></div>
+                </div>
+                <div class="char-chart-col">
+                    <div class="char-chart-label">🎖️ Character Level</div>
+                    <div class="char-chart-wrap"><canvas id="charLevel{{$i}}"></canvas></div>
+                </div>
+                <div class="char-chart-col">
+                    <div class="char-chart-label">💰 Gold</div>
+                    <div class="char-chart-wrap"><canvas id="charGold{{$i}}"></canvas></div>
+                </div>
+            </div>
+        </div>
+        {{end}}
+    {{end}}
+
+    {{end}}{{/* end no-history check */}}
+    {{end}}{{/* end db enabled check */}}
+</div>
+
+<script>
+{{if and .DBEnabled (gt (len .AccountHistory.Labels) 0)}}
+const GOLD_LABELS  = {{.AccountHistory.Labels | json}};
+const GOLD_DATA    = {{.AccountHistory.TotalGold | json}};
+const MOUNTS_DATA  = {{.AccountHistory.Mounts | json}};
+const PETS_DATA    = {{.AccountHistory.Pets | json}};
+
+const chartDefaults = {
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: { mode: 'index', intersect: false },
+    plugins: {
+        legend: { labels: { color: '#c8a050', font: { size: 11, family: "'Palatino Linotype', serif" } } },
+        tooltip: { backgroundColor: 'rgba(10,14,26,0.95)', titleColor: '#f8e6c8', bodyColor: '#c8a050',
+                   borderColor: '#3d3020', borderWidth: 1 }
+    },
+    scales: {
+        x: { ticks: { color: '#9b8a6e', maxTicksLimit: 10, font: { size: 10 } },
+             grid: { color: 'rgba(61,48,32,0.4)' } },
+        y: { ticks: { color: '#9b8a6e', font: { size: 10 } },
+             grid: { color: 'rgba(61,48,32,0.4)' } }
+    }
+};
+
+function formatGold(copper) {
+    if (copper == null) return '0g';
+    const g = Math.floor(copper / 10000);
+    const s = Math.floor((copper % 10000) / 100);
+    const c = copper % 100;
+    let out = '';
+    if (g) out += g + 'g ';
+    if (s) out += s + 's ';
+    if (c || !out) out += c + 'c';
+    return out.trim();
+}
+
+new Chart(document.getElementById('chartGold'), {
+    type: 'line',
+    data: {
+        labels: GOLD_LABELS,
+        datasets: [{ label: 'Total Gold', data: GOLD_DATA,
+            borderColor: '#f8c840', backgroundColor: 'rgba(248,200,64,0.08)',
+            borderWidth: 2, pointRadius: 3, fill: true, tension: 0.3 }]
+    },
+    options: { ...chartDefaults,
+        plugins: { ...chartDefaults.plugins,
+            tooltip: { ...chartDefaults.plugins.tooltip,
+                callbacks: { label: ctx => ' ' + formatGold(ctx.raw) } } },
+        scales: { ...chartDefaults.scales,
+            y: { ...chartDefaults.scales.y,
+                ticks: { ...chartDefaults.scales.y.ticks, callback: v => formatGold(v) } } }
+    }
+});
+
+new Chart(document.getElementById('chartCollections'), {
+    type: 'line',
+    data: {
+        labels: GOLD_LABELS,
+        datasets: [
+            { label: 'Mounts', data: MOUNTS_DATA, borderColor: '#c090ff', backgroundColor: 'rgba(192,144,255,0.08)', borderWidth: 2, pointRadius: 3, fill: true, tension: 0.3 },
+            { label: 'Pets',   data: PETS_DATA,   borderColor: '#80ffcc', backgroundColor: 'rgba(128,255,204,0.08)', borderWidth: 2, pointRadius: 3, fill: true, tension: 0.3 }
+        ]
+    },
+    options: chartDefaults
+});
+
+{{range $i, $c := .CharHistories}}
+new Chart(document.getElementById('charIlvl{{$i}}'), {
+    type: 'line',
+    data: {
+        labels: {{$c.Labels | json}},
+        datasets: [{ label: 'iLvl', data: {{$c.ItemLevel | json}},
+            borderColor: '#a0d0ff', backgroundColor: 'rgba(160,208,255,0.08)',
+            borderWidth: 1.5, pointRadius: 2, fill: true, tension: 0.3 }]
+    },
+    options: { ...chartDefaults,
+        plugins: { legend: { display: false }, tooltip: chartDefaults.plugins.tooltip },
+        scales: {
+            x: { ...chartDefaults.scales.x, ticks: { ...chartDefaults.scales.x.ticks, maxTicksLimit: 6 } },
+            y: { ...chartDefaults.scales.y, ticks: { ...chartDefaults.scales.y.ticks, precision: 0 } }
+        }
+    }
+});
+new Chart(document.getElementById('charLevel{{$i}}'), {
+    type: 'line',
+    data: {
+        labels: {{$c.Labels | json}},
+        datasets: [{ label: 'Level', data: {{$c.Level | json}},
+            borderColor: '#ffe680', backgroundColor: 'rgba(255,230,128,0.08)',
+            borderWidth: 1.5, pointRadius: 2, fill: true, tension: 0.3,
+            stepped: false }]
+    },
+    options: { ...chartDefaults,
+        plugins: { legend: { display: false }, tooltip: chartDefaults.plugins.tooltip },
+        scales: {
+            x: { ...chartDefaults.scales.x, ticks: { ...chartDefaults.scales.x.ticks, maxTicksLimit: 6 } },
+            y: { ...chartDefaults.scales.y, ticks: { ...chartDefaults.scales.y.ticks, precision: 0, stepSize: 1 } }
+        }
+    }
+});
+new Chart(document.getElementById('charGold{{$i}}'), {
+    type: 'line',
+    data: {
+        labels: {{$c.Labels | json}},
+        datasets: [{ label: 'Gold', data: {{$c.Gold | json}},
+            borderColor: '#f8c840', backgroundColor: 'rgba(248,200,64,0.08)',
+            borderWidth: 1.5, pointRadius: 2, fill: true, tension: 0.3 }]
+    },
+    options: { ...chartDefaults,
+        plugins: { legend: { display: false }, tooltip: { ...chartDefaults.plugins.tooltip,
+            callbacks: { label: ctx => ' ' + formatGold(ctx.raw) } } },
+        scales: {
+            x: { ...chartDefaults.scales.x, ticks: { ...chartDefaults.scales.x.ticks, maxTicksLimit: 6 } },
+            y: { ...chartDefaults.scales.y, ticks: { ...chartDefaults.scales.y.ticks, callback: v => formatGold(v) } }
+        }
+    }
+});
+{{end}}
+
+{{end}}
+</script>
+</body>
+</html>
+`
 var professionsTemplate = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -948,6 +1372,8 @@ var professionsTemplate = `<!DOCTYPE html>
             color: #ffaaaa;
         }
         .nav-btn-logout:hover { border-color: #e06060; background: linear-gradient(135deg, rgba(120,30,30,0.9), rgba(80,15,15,0.9)); }
+        .nav-btn-history { background: linear-gradient(135deg, rgba(20,50,90,0.85), rgba(10,35,70,0.85)); border-color: #4080c0; color: #a0d0ff; }
+        .nav-btn-history:hover { border-color: #80c0ff; background: linear-gradient(135deg, rgba(30,70,120,0.9), rgba(15,50,100,0.9)); }
         .logo { max-width: 350px; height: auto; filter: drop-shadow(0 4px 8px rgba(0,0,0,0.5)); margin-bottom: 5px; }
         .github-link {
             position: absolute; top: 14px; right: 18px;
@@ -1161,6 +1587,10 @@ var professionsTemplate = `<!DOCTYPE html>
         <a href="/professions" class="nav-btn nav-btn-prof">
             <img src="/images/professions.png" style="width:20px;height:20px;flex-shrink:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
             Professions
+        </a>
+        <a href="/history" class="nav-btn nav-btn-history">
+            <img src="/images/progress.png" style="width:20px;height:20px;flex-shrink:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
+            History
         </a>
         <a href="/logout" class="nav-btn nav-btn-logout">
             🔓 Re-authenticate
@@ -1529,6 +1959,8 @@ var rosterTemplate = `<!DOCTYPE html>
             color: #ffaaaa;
         }
         .nav-btn-logout:hover { border-color: #e06060; background: linear-gradient(135deg, rgba(120,30,30,0.9), rgba(80,15,15,0.9)); }
+        .nav-btn-history { background: linear-gradient(135deg, rgba(20,50,90,0.85), rgba(10,35,70,0.85)); border-color: #4080c0; color: #a0d0ff; }
+        .nav-btn-history:hover { border-color: #80c0ff; background: linear-gradient(135deg, rgba(30,70,120,0.9), rgba(15,50,100,0.9)); }
         .logo { max-width: 350px; height: auto; filter: drop-shadow(0 4px 8px rgba(0,0,0,0.5)); margin-bottom: 5px; }
 
         /* ── PAGE HEADER ── */
@@ -1810,6 +2242,10 @@ var rosterTemplate = `<!DOCTYPE html>
             <a href="/professions" class="nav-btn nav-btn-prof">
                 <img src="/images/professions.png" style="width:20px;height:20px;flex-shrink:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
                 Professions
+            </a>
+            <a href="/history" class="nav-btn nav-btn-history">
+                <img src="/images/progress.png" style="width:20px;height:20px;flex-shrink:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
+                History
             </a>
             <a href="/logout" class="nav-btn nav-btn-logout">
                 🔓 Re-authenticate
@@ -2189,6 +2625,8 @@ var vaultTemplate = `<!DOCTYPE html>
             color: #ffaaaa;
         }
         .nav-btn-logout:hover { border-color: #e06060; background: linear-gradient(135deg, rgba(120,30,30,0.9), rgba(80,15,15,0.9)); }
+        .nav-btn-history { background: linear-gradient(135deg, rgba(20,50,90,0.85), rgba(10,35,70,0.85)); border-color: #4080c0; color: #a0d0ff; }
+        .nav-btn-history:hover { border-color: #80c0ff; background: linear-gradient(135deg, rgba(30,70,120,0.9), rgba(15,50,100,0.9)); }
         .logo { max-width: 350px; height: auto; filter: drop-shadow(0 4px 8px rgba(0,0,0,0.5)); margin-bottom: 5px; }
 
         .page-header {
@@ -2481,6 +2919,10 @@ var vaultTemplate = `<!DOCTYPE html>
             <a href="/professions" class="nav-btn nav-btn-prof">
                 <img src="/images/professions.png" style="width:20px;height:20px;flex-shrink:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
                 Professions
+            </a>
+            <a href="/history" class="nav-btn nav-btn-history">
+                <img src="/images/progress.png" style="width:20px;height:20px;flex-shrink:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
+                History
             </a>
             <a href="/logout" class="nav-btn nav-btn-logout">
                 🔓 Re-authenticate
@@ -2964,6 +3406,12 @@ const htmlTemplate = `
             color: #ffaaaa;
         }
         .nav-btn-logout:hover { border-color: #e06060; background: linear-gradient(135deg, rgba(120,30,30,0.9), rgba(80,15,15,0.9)); }
+        .nav-btn-history {
+            background: linear-gradient(135deg, rgba(20,50,90,0.85), rgba(10,35,70,0.85));
+            border-color: #4080c0;
+            color: #a0d0ff;
+        }
+        .nav-btn-history:hover { border-color: #80c0ff; background: linear-gradient(135deg, rgba(30,70,120,0.9), rgba(15,50,100,0.9)); }
         .logo {
             max-width: 350px;
             height: auto;
@@ -3412,6 +3860,10 @@ const htmlTemplate = `
                 <a href="/professions" class="nav-btn nav-btn-prof">
                     <img src="/images/professions.png" alt="Professions" style="width:20px;height:20px;flex-shrink:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
                     Professions
+                </a>
+                <a href="/history" class="nav-btn nav-btn-history">
+                    <img src="/images/progress.png" style="width:20px;height:20px;flex-shrink:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
+                    History
                 </a>
                 <a href="/logout" class="nav-btn nav-btn-logout">
                     🔓 Re-authenticate
