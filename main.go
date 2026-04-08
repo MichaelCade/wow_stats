@@ -131,6 +131,7 @@ func main() {
 	http.HandleFunc("/", handleHome)
 	http.HandleFunc("/login", handleLogin)
 	http.HandleFunc("/callback", handleCallback)
+	http.HandleFunc("/logout", handleLogout)
 	http.HandleFunc("/refresh", handleRefresh)
 	http.HandleFunc("/vault", handleVault)
 	http.HandleFunc("/roster", handleRoster)
@@ -163,6 +164,21 @@ func generateRandomState() string {
 func handleLogin(w http.ResponseWriter, r *http.Request) {
 	url := oauth2Config.AuthCodeURL(oauthState)
 	http.Redirect(w, r, url, http.StatusTemporaryRedirect)
+}
+
+func handleLogout(w http.ResponseWriter, r *http.Request) {
+	tokenMutex.Lock()
+	userToken = nil
+	tokenMutex.Unlock()
+
+	summaryMutex.Lock()
+	accountSummary = AccountSummary{
+		Authenticated: false,
+	}
+	summaryMutex.Unlock()
+
+	log.Println("User logged out — token cleared")
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 func handleCallback(w http.ResponseWriter, r *http.Request) {
@@ -657,6 +673,24 @@ func getKeys(m map[string]interface{}) []string {
 }
 
 func handleHome(w http.ResponseWriter, r *http.Request) {
+	// Check whether the stored token has expired; if so, clear it so the
+	// login prompt is shown instead of stale/broken data.
+	tokenMutex.RLock()
+	tok := userToken
+	tokenMutex.RUnlock()
+
+	if tok != nil && !tok.Valid() {
+		tokenMutex.Lock()
+		userToken = nil
+		tokenMutex.Unlock()
+
+		summaryMutex.Lock()
+		accountSummary = AccountSummary{Authenticated: false}
+		summaryMutex.Unlock()
+
+		log.Println("OAuth token expired — clearing session")
+	}
+
 	summaryMutex.RLock()
 	data := accountSummary
 	summaryMutex.RUnlock()
@@ -908,6 +942,12 @@ var professionsTemplate = `<!DOCTYPE html>
             border-color: #20c87a; color: #80ffcc;
         }
         .nav-btn-prof:hover { border-color: #80ffcc; background: linear-gradient(135deg, rgba(30,100,65,0.9), rgba(15,70,45,0.9)); }
+        .nav-btn-logout {
+            background: linear-gradient(135deg, rgba(80,20,20,0.8), rgba(50,10,10,0.8));
+            border-color: #a04040;
+            color: #ffaaaa;
+        }
+        .nav-btn-logout:hover { border-color: #e06060; background: linear-gradient(135deg, rgba(120,30,30,0.9), rgba(80,15,15,0.9)); }
         .logo { max-width: 350px; height: auto; filter: drop-shadow(0 4px 8px rgba(0,0,0,0.5)); margin-bottom: 5px; }
         .github-link {
             position: absolute; top: 14px; right: 18px;
@@ -1121,6 +1161,9 @@ var professionsTemplate = `<!DOCTYPE html>
         <a href="/professions" class="nav-btn nav-btn-prof">
             <img src="/images/professions.png" style="width:20px;height:20px;flex-shrink:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
             Professions
+        </a>
+        <a href="/logout" class="nav-btn nav-btn-logout">
+            🔓 Re-authenticate
         </a>
     </div>
     <img src="/images/World-of-Warcraft-Logo-2001.png" alt="World of Warcraft" class="logo">
@@ -1480,6 +1523,12 @@ var rosterTemplate = `<!DOCTYPE html>
             color: #80ffcc;
         }
         .nav-btn-prof:hover { border-color: #80ffcc; background: linear-gradient(135deg, rgba(30,100,65,0.9), rgba(15,70,45,0.9)); }
+        .nav-btn-logout {
+            background: linear-gradient(135deg, rgba(80,20,20,0.8), rgba(50,10,10,0.8));
+            border-color: #a04040;
+            color: #ffaaaa;
+        }
+        .nav-btn-logout:hover { border-color: #e06060; background: linear-gradient(135deg, rgba(120,30,30,0.9), rgba(80,15,15,0.9)); }
         .logo { max-width: 350px; height: auto; filter: drop-shadow(0 4px 8px rgba(0,0,0,0.5)); margin-bottom: 5px; }
 
         /* ── PAGE HEADER ── */
@@ -1761,6 +1810,9 @@ var rosterTemplate = `<!DOCTYPE html>
             <a href="/professions" class="nav-btn nav-btn-prof">
                 <img src="/images/professions.png" style="width:20px;height:20px;flex-shrink:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
                 Professions
+            </a>
+            <a href="/logout" class="nav-btn nav-btn-logout">
+                🔓 Re-authenticate
             </a>
         </div>
         <img src="/images/World-of-Warcraft-Logo-2001.png" alt="World of Warcraft" class="logo">
@@ -2131,6 +2183,12 @@ var vaultTemplate = `<!DOCTYPE html>
             color: #80ffcc;
         }
         .nav-btn-prof:hover { border-color: #80ffcc; background: linear-gradient(135deg, rgba(30,100,65,0.9), rgba(15,70,45,0.9)); }
+        .nav-btn-logout {
+            background: linear-gradient(135deg, rgba(80,20,20,0.8), rgba(50,10,10,0.8));
+            border-color: #a04040;
+            color: #ffaaaa;
+        }
+        .nav-btn-logout:hover { border-color: #e06060; background: linear-gradient(135deg, rgba(120,30,30,0.9), rgba(80,15,15,0.9)); }
         .logo { max-width: 350px; height: auto; filter: drop-shadow(0 4px 8px rgba(0,0,0,0.5)); margin-bottom: 5px; }
 
         .page-header {
@@ -2423,6 +2481,9 @@ var vaultTemplate = `<!DOCTYPE html>
             <a href="/professions" class="nav-btn nav-btn-prof">
                 <img src="/images/professions.png" style="width:20px;height:20px;flex-shrink:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
                 Professions
+            </a>
+            <a href="/logout" class="nav-btn nav-btn-logout">
+                🔓 Re-authenticate
             </a>
         </div>
         <img src="/images/World-of-Warcraft-Logo-2001.png" alt="World of Warcraft" class="logo">
@@ -2897,6 +2958,12 @@ const htmlTemplate = `
             color: #80ffcc;
         }
         .nav-btn-prof:hover { border-color: #80ffcc; background: linear-gradient(135deg, rgba(30,100,65,0.9), rgba(15,70,45,0.9)); }
+        .nav-btn-logout {
+            background: linear-gradient(135deg, rgba(80,20,20,0.8), rgba(50,10,10,0.8));
+            border-color: #a04040;
+            color: #ffaaaa;
+        }
+        .nav-btn-logout:hover { border-color: #e06060; background: linear-gradient(135deg, rgba(120,30,30,0.9), rgba(80,15,15,0.9)); }
         .logo {
             max-width: 350px;
             height: auto;
@@ -3345,6 +3412,9 @@ const htmlTemplate = `
                 <a href="/professions" class="nav-btn nav-btn-prof">
                     <img src="/images/professions.png" alt="Professions" style="width:20px;height:20px;flex-shrink:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.6));">
                     Professions
+                </a>
+                <a href="/logout" class="nav-btn nav-btn-logout">
+                    🔓 Re-authenticate
                 </a>
             </div>
             {{end}}
